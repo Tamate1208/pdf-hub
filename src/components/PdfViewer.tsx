@@ -233,7 +233,12 @@ interface PdfViewerProps {
   onAddRedaction: (rect: Omit<RedactRect, 'id'>) => void;
   onRemoveRedaction: (id: string) => void;
   onAddDrawing: (item: Omit<DrawingItem, 'id'>) => void;
-  onUpdateDrawing?: (id: string, updates: Partial<DrawingItem>, recordHistory?: boolean) => void;
+  onUpdateDrawing?: (
+    id: string,
+    updates: Partial<DrawingItem>,
+    recordHistory?: boolean,
+    prevOverride?: Partial<DrawingItem>
+  ) => void;
   onRemoveDrawing: (id: string) => void;
 }
 
@@ -294,6 +299,17 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
   useEffect(() => {
     setPanOffset({ x: 0, y: 0 })
   }, [pageInfo?.index, resetViewTrigger])
+
+  // ページ切り替え時に未確定の入力ポップアップ・描画途中の頂点・選択状態をクリア
+  useEffect(() => {
+    setTextInput(null)
+    setPolygonPoints([])
+    setRulerAreaPoints([])
+    setRulerResult(null)
+    setSelectedDrawingId(null)
+    setHoveredDrawingId(null)
+    setSnapGuide(null)
+  }, [pageInfo?.index])
 
   // 「ウィンドウに合わせる」ボタン押下時: 表示領域サイズに合わせて最適ズームを計算し中央に配置
   useEffect(() => {
@@ -649,17 +665,25 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     }
   }
 
-  // テキスト回転ハンドルのドラッグ開始処理
+  // テキスト・画像の回転ハンドルのドラッグ開始処理
   const handleRotateStart = (item: DrawingItem, e: React.PointerEvent) => {
     e.stopPropagation()
     setRotatingDrawingId(item.id)
     const tx = (item.x ?? 0) * 1.5
     const ty = (item.y ?? 0) * 1.5
-    const fontPx = item.fontSize * 1.5
-    const estW = estimateTextWidth(item.text || '', fontPx)
-    // テキストの中心座標
-    const cx = tx + estW / 2
-    const cy = ty - fontPx / 2
+    let cx = tx
+    let cy = ty
+    if (item.tool === 'image') {
+      const tw = (item.w ?? 100) * 1.5
+      const th = (item.h ?? 100) * 1.5
+      cx = tx + tw / 2
+      cy = ty + th / 2
+    } else {
+      const fontPx = (item.fontSize || 16) * 1.5
+      const estW = estimateTextWidth(item.text || '', fontPx)
+      cx = tx + estW / 2
+      cy = ty - fontPx / 2
+    }
     rotateCenterRef.current = { x: cx, y: cy }
     rotateInitialAngleRef.current = item.rotation || 0
 
@@ -671,7 +695,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     }
   }
 
-  // テキスト回転ドラッグ中のグローバル追従と確定
+  // テキスト・画像の回転ドラッグ中のグローバル追従と確定
   useEffect(() => {
     if (!rotatingDrawingId) return
 
@@ -713,7 +737,14 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
         }
 
         newRot = ((newRot % 360) + 360) % 360
-        onUpdateDrawing?.(rotatingDrawingId, { rotation: newRot }, true)
+        if (newRot !== rotateInitialAngleRef.current) {
+          onUpdateDrawing?.(
+            rotatingDrawingId,
+            { rotation: newRot },
+            true,
+            { rotation: rotateInitialAngleRef.current }
+          )
+        }
       }
       setRotatingDrawingId(null)
       rotateCenterRef.current = null
@@ -749,14 +780,28 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
 
     const handleGlobalResizeMove = (e: PointerEvent) => {
       if (!resizeImageStartRef.current) return
-      const { startX, initW, initH, aspectRatio } = resizeImageStartRef.current
+      const { startX, initW, aspectRatio } = resizeImageStartRef.current
       const deltaX = (e.clientX - startX) / zoom / 1.5
       const newW = Math.max(20, initW + deltaX)
       const newH = Math.max(20, newW / (aspectRatio || 1))
       onUpdateDrawing?.(resizingImageId, { w: Math.round(newW), h: Math.round(newH) }, false)
     }
 
-    const handleGlobalResizeUp = () => {
+    const handleGlobalResizeUp = (e: PointerEvent) => {
+      if (resizeImageStartRef.current) {
+        const { startX, initW, initH, aspectRatio } = resizeImageStartRef.current
+        const deltaX = (e.clientX - startX) / zoom / 1.5
+        if (Math.abs(deltaX) > 0.5) {
+          const newW = Math.round(Math.max(20, initW + deltaX))
+          const newH = Math.round(Math.max(20, newW / (aspectRatio || 1)))
+          onUpdateDrawing?.(
+            resizingImageId,
+            { w: newW, h: newH },
+            true,
+            { w: initW, h: initH }
+          )
+        }
+      }
       setResizingImageId(null)
       resizeImageStartRef.current = null
     }
@@ -970,8 +1015,8 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
               y: Math.round(((snap.y ?? 0) + deltaY) * 10) / 10,
             }
           }
-          // 履歴記録付きで確定
-          onUpdateDrawing?.(movingDrawingId, updates, true)
+          // 履歴記録付きで確定（ドラッグ開始前のスナップショットを履歴に保存）
+          onUpdateDrawing?.(movingDrawingId, updates, true, snap)
         }
       }
 

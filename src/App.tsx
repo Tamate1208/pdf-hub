@@ -321,13 +321,14 @@ export default function App() {
     }
     setLastAddedRect(baseAreaRect)
 
-    // テキスト吸着モードの場合: 指定矩形内のテキスト行バウンディングボックスを抽出
+    // テキスト吸着モードの場合: 指定矩形内のテキスト行バウンディングボックスを抽出（ページ回転角も反映）
     if (selectMode === 'text' && pdfBytes) {
       try {
         const textRects = await extractTextRectsInBBox(
           pdfBytes,
           rectData.pageIndex,
-          [rectData.x0, rectData.y0, rectData.x1, rectData.y1]
+          [rectData.x0, rectData.y0, rectData.x1, rectData.y1],
+          pageRotations[rectData.pageIndex] || 0
         )
         if (textRects.length > 0) {
           const newRects: RedactRect[] = textRects.map(([x0, y0, x1, y1]) => ({
@@ -379,12 +380,13 @@ export default function App() {
       const newRects: RedactRect[] = []
 
       for (const p of otherPages) {
-        // テキスト吸着モードの場合は各ページ内の該当テキスト行を抽出
+        // テキスト吸着モードの場合は各ページ内の該当テキスト行を抽出（各ページの回転角も反映）
         if (selectMode === 'text') {
           const textRects = await extractTextRectsInBBox(
             pdfBytes,
             p.index,
-            [lastAddedRect.x0, lastAddedRect.y0, lastAddedRect.x1, lastAddedRect.y1]
+            [lastAddedRect.x0, lastAddedRect.y0, lastAddedRect.x1, lastAddedRect.y1],
+            pageRotations[p.index] || 0
           )
           if (textRects.length > 0) {
             for (const [x0, y0, x1, y1] of textRects) {
@@ -484,24 +486,29 @@ export default function App() {
     setDrawings((prev) => prev.filter((d) => d.id !== id))
   }
 
-  // 描画アイテムの更新（移動・変形）
+  // 描画アイテムの更新（移動・変形・テキスト再編集）
   const handleUpdateDrawing = (
     id: string,
     updates: Partial<DrawingItem>,
-    recordHistory: boolean = true
+    recordHistory: boolean = true,
+    prevOverride?: Partial<DrawingItem>
   ) => {
     setDrawings((prev) => {
       const target = prev.find((d) => d.id === id)
       if (!target) return prev
 
       if (recordHistory) {
+        const src = prevOverride || target
         const prevProps: Partial<DrawingItem> = {}
-        if (target.x !== undefined) prevProps.x = target.x
-        if (target.y !== undefined) prevProps.y = target.y
-        if (target.w !== undefined) prevProps.w = target.w
-        if (target.h !== undefined) prevProps.h = target.h
-        if (target.rotation !== undefined) prevProps.rotation = target.rotation
-        if (target.points) prevProps.points = target.points.map((p) => ({ ...p }))
+        if (src.x !== undefined) prevProps.x = src.x
+        if (src.y !== undefined) prevProps.y = src.y
+        if (src.w !== undefined) prevProps.w = src.w
+        if (src.h !== undefined) prevProps.h = src.h
+        if (src.rotation !== undefined) prevProps.rotation = src.rotation
+        if (src.text !== undefined) prevProps.text = src.text
+        if (src.bgWhite !== undefined) prevProps.bgWhite = src.bgWhite
+        if (src.fontSize !== undefined) prevProps.fontSize = src.fontSize
+        if (src.points) prevProps.points = src.points.map((p) => ({ ...p }))
 
         setHistory((h) => [...h, { type: 'move_drawing', id, prev: prevProps }])
       }
@@ -577,7 +584,12 @@ export default function App() {
       const newRects: RedactRect[] = []
 
       for (const pIndex of targetPageIndices) {
-        const hits = await searchPageKeyword(pdfBytes, pIndex, keyword)
+        const hits = await searchPageKeyword(
+          pdfBytes,
+          pIndex,
+          keyword,
+          pageRotations[pIndex] || 0
+        )
         totalFound += hits.length
         for (const [x0, y0, x1, y1] of hits) {
           newRects.push({
@@ -1511,6 +1523,9 @@ export default function App() {
         fileSize={pdfBytes?.byteLength ?? null}
         totalRedactions={redactions.length}
         totalDrawings={drawings.length}
+        hasOtherEdits={
+          Object.values(pageRotations).some((r) => r !== 0) || bookmarks.length > 0
+        }
         isProcessing={isProcessing}
         isDeskOpen={isDeskOpen}
         deskItemCount={deskItems.length}

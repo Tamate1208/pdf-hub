@@ -332,9 +332,6 @@ export const ThumbnailSidebar: React.FC<ThumbnailSidebarProps> = ({
                         src={thumbUrl}
                         alt={`P.${p.index + 1}`}
                         className="w-full h-full object-contain transition-transform duration-200"
-                        style={{
-                          transform: rot ? `rotate(${rot}deg)` : undefined,
-                        }}
                       />
                     ) : (
                       <div className="w-full h-full bg-slate-200 animate-pulse flex items-center justify-center text-[10px] text-slate-400">

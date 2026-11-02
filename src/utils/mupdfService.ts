@@ -375,17 +375,30 @@ export async function deletePagesFromPdf(
 }
 
 /**
- * ページ内テキスト検索（キーワード一括消しゴム用）
+ * ページ内テキスト検索（キーワード一括消しゴム用・ページ回転対応）
  */
 export async function searchPageKeyword(
   pdfBytes: Uint8Array,
   pageIndex: number,
-  keyword: string
+  keyword: string,
+  rotationOffset: number = 0
 ): Promise<Array<[number, number, number, number]>> {
   if (!keyword.trim()) return [];
   const m = await getMuPdf();
   const doc = m.Document.openDocument(pdfBytes, 'application/pdf');
-  const page = doc.loadPage(pageIndex);
+  let page = doc.loadPage(pageIndex);
+
+  if (rotationOffset !== 0) {
+    let baseRot = 0;
+    try {
+      const rotObj = page.getObject().get('Rotate');
+      if (rotObj && !rotObj.isNull()) baseRot = rotObj.asNumber() || 0;
+    } catch {}
+    const newRot = (((baseRot + rotationOffset) % 360) + 360) % 360;
+    page.getObject().put('Rotate', doc.newInteger(newRot));
+    page.destroy();
+    page = doc.loadPage(pageIndex);
+  }
 
   const hits = page.search(keyword);
   const bounds = page.getBounds();
@@ -418,17 +431,31 @@ export async function searchPageKeyword(
 }
 
 /**
- * 指定矩形領域内にあるテキスト行の精密なバウンディングボックスを抽出（テキスト吸着選択用）
+ * 指定矩形領域内にあるテキスト行の精密なバウンディングボックスを抽出（テキスト吸着選択用・ページ回転対応）
  */
 export async function extractTextRectsInBBox(
   pdfBytes: Uint8Array,
   pageIndex: number,
-  bbox: [number, number, number, number]
+  bbox: [number, number, number, number],
+  rotationOffset: number = 0
 ): Promise<Array<[number, number, number, number]>> {
   const [rx0, ry0, rx1, ry1] = bbox;
   const m = await getMuPdf();
   const doc = m.Document.openDocument(pdfBytes, 'application/pdf');
-  const page = doc.loadPage(pageIndex);
+  let page = doc.loadPage(pageIndex);
+
+  if (rotationOffset !== 0) {
+    let baseRot = 0;
+    try {
+      const rotObj = page.getObject().get('Rotate');
+      if (rotObj && !rotObj.isNull()) baseRot = rotObj.asNumber() || 0;
+    } catch {}
+    const newRot = (((baseRot + rotationOffset) % 360) + 360) % 360;
+    page.getObject().put('Rotate', doc.newInteger(newRot));
+    page.destroy();
+    page = doc.loadPage(pageIndex);
+  }
+
   const textPage = page.toStructuredText();
   const json = JSON.parse(textPage.asJSON());
   const bounds = page.getBounds();
@@ -467,6 +494,38 @@ export async function extractTextRectsInBBox(
   }
 
   return rects;
+}
+
+// テキストの描画幅 (pt) を文字種（全角・半角）に応じて高精度に算出するヘルパー（PdfViewer.tsx と完全一致）
+function estimateTextWidthPt(text: string, fontPt: number): number {
+  if (!text) return 8;
+  let width = 0;
+  for (const ch of text) {
+    const code = ch.charCodeAt(0);
+    if (code <= 0x007f || (code >= 0xff61 && code <= 0xff9f)) {
+      if (
+        ch === ' ' ||
+        ch === '.' ||
+        ch === ',' ||
+        ch === ':' ||
+        ch === ';' ||
+        ch === '!' ||
+        ch === 'l' ||
+        ch === 'i'
+      ) {
+        width += fontPt * 0.32;
+      } else if (ch >= '0' && ch <= '9') {
+        width += fontPt * 0.58;
+      } else if (ch >= 'A' && ch <= 'Z') {
+        width += fontPt * 0.65;
+      } else {
+        width += fontPt * 0.52;
+      }
+    } else {
+      width += fontPt * 0.98;
+    }
+  }
+  return Math.ceil(width) + 4;
 }
 
 // 16進カラーコード (#ef4444等) を [r, g, b] (0〜1) に変換
@@ -848,37 +907,44 @@ export async function applyRedactions(
       } else if (d.tool === 'text') {
         if (d.x === undefined || d.y === undefined || !d.text) continue;
         const fontPx = d.fontSize || 16;
-        const estW = Math.max(fontPx * 2, d.text.length * fontPx * 1.2 + 20);
-        const estH = fontPx + 10;
+        // 画面表示 (PdfViewer.tsx) と100%一致するテキスト幅と中心座標
+        const estW = estimateTextWidthPt(d.text, fontPx);
+        const annotW = Math.max(estW + 24, d.text.length * fontPx * 1.2 + 20);
+        const vcx = d.x + estW / 2;
+        const vcy = d.y - fontPx / 2;
         const rotDeg = d.rotation || 0;
 
-        // 背景を白で隠す矩形（ベクターで確実に白塗り・回転対応）
+        // 背景を白で隠す矩形（ベクターで確実に白塗り・画面表示と同じ幅・同じ回転中心）
         if (d.bgWhite) {
           stream += 'q\n';
           stream += '1 1 1 rg 1 1 1 RG\n';
+
+          const bx0 = d.x - 2;
+          const by0 = d.y - fontPx;
+          const bx1 = d.x - 2 + estW;
+          const by1 = d.y + 4;
 
           if (rotDeg !== 0) {
             const rad = (rotDeg * Math.PI) / 180;
             const cos = Math.cos(rad);
             const sin = Math.sin(rad);
-            const vcx = d.x - 2 + estW / 2;
-            const vcy = d.y - fontPx + 2 + estH / 2;
+            const rotV = (vx: number, vy: number): [number, number] => [
+              vcx + (vx - vcx) * cos - (vy - vcy) * sin,
+              vcy + (vx - vcx) * sin + (vy - vcy) * cos,
+            ];
             const corners: [number, number][] = [
-              [-estW / 2, -estH / 2],
-              [estW / 2, -estH / 2],
-              [estW / 2, estH / 2],
-              [-estW / 2, estH / 2],
-            ].map(([dx, dy]) => [
-              vcx + dx * cos - dy * sin,
-              vcy + dx * sin + dy * cos,
-            ]);
+              rotV(bx0, by0),
+              rotV(bx1, by0),
+              rotV(bx1, by1),
+              rotV(bx0, by1),
+            ];
             stream += `${fmtPt(corners[0][0], corners[0][1])} m\n`;
             stream += `${fmtPt(corners[1][0], corners[1][1])} l\n`;
             stream += `${fmtPt(corners[2][0], corners[2][1])} l\n`;
             stream += `${fmtPt(corners[3][0], corners[3][1])} l\n`;
             stream += 'h f\n';
           } else {
-            stream += `${fmtRect(d.x - 2, d.y - fontPx + 2, d.x - 2 + estW, d.y + 4)} re f\n`;
+            stream += `${fmtRect(bx0, by0, bx1, by1)} re f\n`;
           }
 
           stream += 'Q\n';
@@ -888,7 +954,7 @@ export async function applyRedactions(
         // 注釈の背景色（/C）による黒塗りマスク化や印刷プレビューでの不整合を100%防ぐため、
         // 生成した外観 Form XObject (AP/N) をページの Contents ストリームに直接 Do 描画して注釈自体は削除する
         const annot = page.createAnnotation('FreeText');
-        annot.setRect([d.x, d.y - fontPx, d.x + estW, d.y + 10]);
+        annot.setRect([d.x, d.y - fontPx, d.x + annotW, d.y + 10]);
         annot.setContents(d.text);
         annot.setBorderWidth(0);
         annot.setDefaultAppearance('Heiti', fontPx, rgb);
@@ -919,7 +985,7 @@ export async function applyRedactions(
               const pdfRad = -(rotDeg * Math.PI) / 180;
               const cos = Math.cos(pdfRad);
               const sin = Math.sin(pdfRad);
-              const [pcx, pcy] = toPdfPt(d.x + estW / 2, d.y - fontPx / 2);
+              const [pcx, pcy] = toPdfPt(vcx, vcy);
               const e = pcx - pcx * cos + pcy * sin;
               const f = pcy - pcx * sin - pcy * cos;
               stream += `${cos.toFixed(6)} ${sin.toFixed(6)} ${(-sin).toFixed(6)} ${cos.toFixed(6)} ${e.toFixed(2)} ${f.toFixed(2)} cm\n`;

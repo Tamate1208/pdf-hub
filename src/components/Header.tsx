@@ -14,6 +14,7 @@ interface HeaderProps {
   fileSize?: number | null;
   totalRedactions: number;
   totalDrawings?: number;
+  hasOtherEdits?: boolean;
   isProcessing: boolean;
   isDeskOpen?: boolean;
   deskItemCount?: number;
@@ -35,6 +36,7 @@ export const Header: React.FC<HeaderProps> = ({
   fileSize,
   totalRedactions,
   totalDrawings = 0,
+  hasOtherEdits = false,
   isProcessing,
   isDeskOpen = false,
   deskItemCount = 0,
@@ -56,12 +58,17 @@ export const Header: React.FC<HeaderProps> = ({
     optimizedImagesCount: number;
   } | null>(null)
   const totalCount = totalRedactions + totalDrawings
+  const hasAnyEdits = totalCount > 0 || hasOtherEdits
   const saveBtnLabel = isProcessing
     ? '処理中...'
     : totalRedactions > 0 && totalDrawings > 0
     ? '確定保存 (墨消し・校正)'
     : totalDrawings > 0
     ? '確定保存 (校正済)'
+    : totalRedactions > 0
+    ? '確定保存 (完全墨消し)'
+    : hasOtherEdits
+    ? '確定保存 (回転・編集済)'
     : '確定保存 (完全墨消し)'
   return (
     <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur-md px-6 py-3.5 flex items-center justify-between sticky top-0 z-30 shadow-md">
@@ -204,7 +211,7 @@ export const Header: React.FC<HeaderProps> = ({
             onClick={onSaveDraftClick}
             disabled={isProcessing}
             className={`px-3.5 py-2 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 border active:scale-95 shadow-sm cursor-pointer disabled:opacity-50 ${
-              totalCount > 0
+              hasAnyEdits
                 ? 'bg-indigo-950/90 hover:bg-indigo-900 text-indigo-200 border-indigo-500/60 ring-1 ring-indigo-400/30'
                 : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
             }`}
@@ -220,11 +227,11 @@ export const Header: React.FC<HeaderProps> = ({
             onClick={onSaveClick}
             disabled={isProcessing}
             className={`px-3.5 py-2 rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow-lg active:scale-95 ${
-              totalCount > 0
+              hasAnyEdits
                 ? 'bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 text-white shadow-rose-600/30 ring-1 ring-rose-400/50 cursor-pointer'
                 : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer'
             }`}
-            title={totalCount === 0 ? '消しゴム枠または描画アイテムを設定してから保存してください' : '指定箇所のテキスト・画像を物理切除して確定保存します（不可逆）'}
+            title={!hasAnyEdits ? '消しゴム枠・描画アイテム・ページ回転などを設定してから保存してください' : '指定箇所のテキスト・画像を物理切除し、編集内容を確定保存します（不可逆）'}
           >
             <Download className={`w-4 h-4 ${isProcessing ? 'animate-bounce' : ''}`} />
             <span>{saveBtnLabel}</span>
