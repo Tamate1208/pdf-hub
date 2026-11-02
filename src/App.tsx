@@ -121,6 +121,14 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const loadGenRef = useRef<number>(0)
+  // 各ページが現在どの解像度倍率（scale）でレンダリングされているかを管理（拡大時の動的ハイレゾ再描画用）
+  const pageRenderScalesRef = useRef<Map<number, number>>(new Map())
+
+  // 現在のズーム倍率とデバイスピクセル比に応じた最適なレンダリング倍率 (1.5 〜 4.5) を算出
+  const getTargetRenderScale = (z: number) => {
+    const dpr = typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 1.5) : 1
+    return Math.min(4.5, Math.max(1.5, Math.round(1.5 * z * dpr * 10) / 10))
+  }
 
   // 古い ObjectURL を安全にメモリ解放するヘルパー
   const revokeUrlMap = (map: Map<number, string>) => {
@@ -219,7 +227,9 @@ export default function App() {
 
       // 最初のページの高画質画像を生成した時点で即座に画面を表示！
       const firstPageRot = restoredRotations[0] || 0
-      const firstPageImg = await renderPageImage(bytes, 0, 1.5, firstPageRot)
+      const initScale = getTargetRenderScale(zoom)
+      const firstPageImg = await renderPageImage(bytes, 0, initScale, firstPageRot)
+      pageRenderScalesRef.current = new Map([[0, initScale]])
       setPageImages(new Map([[0, firstPageImg]]))
       setIsLoadingPdf(false)
 
@@ -247,11 +257,47 @@ export default function App() {
     if (!pdfBytes || !docInfo) return
     const rot = pageRotations[currentPage] || 0
     if (!pageImages.has(currentPage)) {
-      renderPageImage(pdfBytes, currentPage, 1.5, rot).then((url) => {
+      const targetScale = getTargetRenderScale(zoom)
+      pageRenderScalesRef.current.set(currentPage, targetScale)
+      renderPageImage(pdfBytes, currentPage, targetScale, rot).then((url) => {
         setPageImages((prev) => new Map(prev).set(currentPage, url))
       })
     }
   }, [currentPage, pdfBytes, docInfo, pageRotations])
+
+  // 拡大表示（ズームイン）した際、現在ページの解像度が不足していれば高精細（ハイレゾ）で動的に再レンダリング
+  useEffect(() => {
+    if (!pdfBytes || !docInfo) return
+    const targetScale = getTargetRenderScale(zoom)
+    const currentScale = pageRenderScalesRef.current.get(currentPage) || 1.5
+    if (targetScale <= currentScale + 0.15) return
+
+    let cancelled = false
+    const timer = setTimeout(() => {
+      const rot = pageRotations[currentPage] || 0
+      renderPageImage(pdfBytes, currentPage, targetScale, rot)
+        .then((url) => {
+          if (cancelled) {
+            if (url.startsWith('blob:')) URL.revokeObjectURL(url)
+            return
+          }
+          pageRenderScalesRef.current.set(currentPage, targetScale)
+          setPageImages((prev) => {
+            const old = prev.get(currentPage)
+            if (old && old !== url && old.startsWith('blob:')) {
+              URL.revokeObjectURL(old)
+            }
+            return new Map(prev).set(currentPage, url)
+          })
+        })
+        .catch((err) => console.warn('高解像度再描画エラー:', err))
+    }, 180)
+
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [zoom, currentPage, pdfBytes, docInfo, pageRotations])
 
   // ファイルドラッグ＆ドロップ受付
   const handleDrop = (e: React.DragEvent) => {
@@ -576,10 +622,11 @@ export default function App() {
       setDocInfo(newDocInfo)
 
       // サムネイルとプレビュー画像の再生成
+      const targetScale = getTargetRenderScale(zoom)
       const [thumbUrl, mainUrl] = await Promise.all([
         renderPageImage(pdfBytes, pageIndex, 0.3, newRot),
         pageIndex === currentPage
-          ? renderPageImage(pdfBytes, pageIndex, 1.5, newRot)
+          ? renderPageImage(pdfBytes, pageIndex, targetScale, newRot)
           : Promise.resolve(null),
       ])
 
@@ -589,10 +636,20 @@ export default function App() {
         return new Map(prev).set(pageIndex, thumbUrl)
       })
       if (mainUrl) {
+        pageRenderScalesRef.current.set(pageIndex, targetScale)
         setPageImages((prev) => {
           const old = prev.get(pageIndex)
           if (old && old.startsWith('blob:')) URL.revokeObjectURL(old)
           return new Map(prev).set(pageIndex, mainUrl)
+        })
+      } else {
+        pageRenderScalesRef.current.delete(pageIndex)
+        setPageImages((prev) => {
+          const next = new Map(prev)
+          const old = next.get(pageIndex)
+          if (old && old.startsWith('blob:')) URL.revokeObjectURL(old)
+          next.delete(pageIndex)
+          return next
         })
       }
       showToast(`🔄 ページ ${pageIndex + 1} を ${newRot}° に回転しました。`)
@@ -626,12 +683,14 @@ export default function App() {
       setBookmarks(newBms)
 
       // 現在ページのプレビュー画像を再生成
+      const targetScale = getTargetRenderScale(zoom)
       const mainUrl = await renderPageImage(
         mergedBytes,
         currentPage,
-        1.5,
+        targetScale,
         pageRotations[currentPage] || 0
       )
+      pageRenderScalesRef.current = new Map([[currentPage, targetScale]])
       setPageImages((prev) => {
         revokeUrlMap(prev)
         return new Map([[currentPage, mainUrl]])
@@ -750,12 +809,14 @@ export default function App() {
       setCurrentPage(newCurrentPage)
 
       // メイン画像再生成
+      const targetScale = getTargetRenderScale(zoom)
       const mainUrl = await renderPageImage(
         newBytes,
         newCurrentPage,
-        1.5,
+        targetScale,
         newRotations[newCurrentPage] || 0
       )
+      pageRenderScalesRef.current = new Map([[newCurrentPage, targetScale]])
       setPageImages((prev) => {
         revokeUrlMap(prev)
         return new Map([[newCurrentPage, mainUrl]])
@@ -979,12 +1040,14 @@ export default function App() {
         setPdfBytes(res.bytes)
         const newInfo = await getPdfInfo(res.bytes, pageRotations)
         setDocInfo(newInfo)
+        const targetScale = getTargetRenderScale(zoom)
         const mainUrl = await renderPageImage(
           res.bytes,
           currentPage,
-          1.5,
+          targetScale,
           pageRotations[currentPage] || 0
         )
+        pageRenderScalesRef.current = new Map([[currentPage, targetScale]])
         setPageImages((prev) => {
           revokeUrlMap(prev)
           return new Map([[currentPage, mainUrl]])

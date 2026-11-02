@@ -201,13 +201,15 @@ export async function getPdfInfo(
     } catch {}
 
     const offsetRot = pageRotations[i] || 0;
+    const normOffsetRot = (((offsetRot % 360) + 360) % 360);
     const effectiveRot = (((baseRot + offsetRot) % 360) + 360) % 360;
 
     const rawW = Math.abs(bounds[2] - bounds[0]);
     const rawH = Math.abs(bounds[3] - bounds[1]);
 
-    // 90度または270度回転のときは幅と高さを入れ替える
-    const isSideways = effectiveRot === 90 || effectiveRot === 270;
+    // page.getBounds() は baseRot（元のページ回転角）を反映済みの視覚サイズを返すため、
+    // アプリ上で追加回転した分（normOffsetRot）が90度または270度のときだけ幅と高さを入れ替える
+    const isSideways = normOffsetRot === 90 || normOffsetRot === 270;
     pages.push({
       index: i,
       width: isSideways ? rawH : rawW,
@@ -401,11 +403,12 @@ export async function searchPageKeyword(
       const rawX1 = Math.max(q[2], q[6]);
       const rawY1 = Math.max(q[5], q[7]);
 
-      // 視認性と墨消し漏れ防止のため余白を付与し、ページ枠内にクランプ
-      const x0 = Math.max(0, rawX0 - 2);
-      const y0 = Math.max(0, rawY0 - 2);
-      const x1 = Math.min(pageW, rawX1 + 2);
-      const y1 = Math.min(pageH, rawY1 + 2);
+      // 表の罫線（上下枠線）への干渉を防ぎつつ文字を確実に覆うよう余白を最適化し、ページ枠内にクランプ
+      const padY = rawY1 - rawY0 > 4 ? 0.5 : 0;
+      const x0 = Math.max(0, rawX0 - 0.5);
+      const y0 = Math.max(0, rawY0 + padY);
+      const x1 = Math.min(pageW, rawX1 + 0.5);
+      const y1 = Math.min(pageH, rawY1 - padY);
 
       rects.push([x0, y0, x1, y1]);
     }
@@ -450,13 +453,14 @@ export async function extractTextRectsInBBox(
       const ix1 = Math.min(rx1, lx1);
       const iy1 = Math.min(ry1, ly1);
 
-      // 交差判定
+      // 交差判定（表のセル罫線に重ならないよう上下は行ボックスの0.5pt内側に収める）
       if (ix1 - ix0 >= 2 && iy1 - iy0 >= 2) {
+        const padY = ly1 - ly0 > 4 ? 0.5 : 0;
         rects.push([
-          Math.max(0, ix0 - 2),
-          Math.max(0, ly0 - 2),
-          Math.min(pageW, ix1 + 2),
-          Math.min(pageH, iy1 + 2),
+          Math.max(0, ix0 - 0.5),
+          Math.max(0, ly0 + padY),
+          Math.min(pageW, ix1 + 0.5),
+          Math.min(pageH, ly1 - padY),
         ]);
       }
     }
@@ -602,8 +606,8 @@ export async function applyRedactions(
 
     if (rectList.length === 0 && drawList.length === 0 && !hasRotation) continue;
 
-    const page = doc.loadPage(i);
-    const pageObj = page.getObject();
+    let page = doc.loadPage(i);
+    let pageObj = page.getObject();
 
     // ページの回転を適用（可逆保存用に元の回転角を記録）
     let baseRot = 0;
@@ -616,28 +620,78 @@ export async function applyRedactions(
     if (hasRotation) {
       const finalRot = (((baseRot + pageRotations[i]) % 360) + 360) % 360;
       pageObj.put('Rotate', doc.newInteger(finalRot));
+      page.destroy();
+      page = doc.loadPage(i);
+      pageObj = page.getObject();
     }
 
     if (rectList.length === 0 && drawList.length === 0) {
       page.destroy();
       continue;
     }
-    const bounds = page.getBounds();
 
-    // 画面座標 (左上原点) から PDF 座標 (左下原点) への変換ヘルパー
-    const toPdfX = (x: number) => bounds[0] + x;
-    const toPdfY = (y: number) => bounds[3] - y;
-
-    // 1. 墨消し物理切除（テキスト・画像ストリームの不可逆物理削除）
+    // 1. 墨消し物理切除（テキスト・画像ストリームの不可逆物理削除）および既存 Contents ストリームの正規化
     // ※ 一時保存（isDraft: true）の場合は物理切除を行わず、原稿データを100%無傷で保持する
-    if (!isDraft && rectList.length > 0) {
-      for (const r of rectList) {
-        const annot = page.createAnnotation('Redact');
-        annot.setRect([r.x0, r.y0, r.x1, r.y1]);
+    if (!isDraft) {
+      const isTextSnapOrSearch = (id: string) =>
+        id.startsWith('text_') || id.startsWith('copy_text_') || id.startsWith('search_');
+
+      if (rectList.length > 0) {
+        // (A) テキスト吸着・検索枠（または黒塗り枠）：ベクター罫線（表の枠線等）を保護 (line_art_method = 0)
+        // (B) 自由矩形の白塗り枠：囲んだ範囲の線画も含めて消去 (line_art_method = 1)
+        const keepLineArtRects = rectList.filter(
+          (r) => isTextSnapOrSearch(r.id) || (r.color || defaultColor) === 'black'
+        );
+        const removeLineArtRects = rectList.filter(
+          (r) => !isTextSnapOrSearch(r.id) && (r.color || defaultColor) === 'white'
+        );
+
+        if (keepLineArtRects.length > 0) {
+          for (const r of keepLineArtRects) {
+            const annot = page.createAnnotation('Redact');
+            annot.setRect([r.x0, r.y0, r.x1, r.y1]);
+          }
+          // black_boxes=false, image_method=2(PIXELS), line_art_method=0(NONE: 表の罫線保護), text_method=0(REMOVE)
+          page.applyRedactions(false, 2, 0, 0);
+        }
+
+        if (removeLineArtRects.length > 0) {
+          for (const r of removeLineArtRects) {
+            const annot = page.createAnnotation('Redact');
+            annot.setRect([r.x0, r.y0, r.x1, r.y1]);
+          }
+          // black_boxes=false, image_method=2(PIXELS), line_art_method=1(REMOVE_IF_COVERED), text_method=0(REMOVE)
+          page.applyRedactions(false, 2, 1, 0);
+        }
+      } else if (drawList.length > 0) {
+        // 墨消し枠が0件で描画のみの場合でも、元PDFの Contents ストリーム末尾に残った未クローズの cm / q（縮小スケール等）を
+        // MuPDF エンジンに正規化（q ... Q バランス化）させ、印刷プレビューでの描画位置ズレを100%防止する
+        const dummyAnnot = page.createAnnotation('Redact');
+        dummyAnnot.setRect([-100, -100, -90, -90]);
+        page.applyRedactions(false, 0, 0, 1);
       }
-      // black_boxes = false で実行！エンジンによる黒ボックス強制描画を停止し、物理切除のみを行う
-      page.applyRedactions(false);
     }
+
+    // 画面視覚座標 (左上原点: vx, vy) から PDF 内部コンテンツ座標への厳密な逆行列変換ヘルパー
+    // （元から /Rotate 90/180/270 が設定された図面や非ゼロ MediaBox/CropBox でも100%座標が一致する）
+    const inv = m.Matrix.invert(page.getTransform());
+    const toPdfPt = (vx: number, vy: number): [number, number] => [
+      inv[0] * vx + inv[2] * vy + inv[4],
+      inv[1] * vx + inv[3] * vy + inv[5],
+    ];
+    const fmtPt = (vx: number, vy: number): string => {
+      const [px, py] = toPdfPt(vx, vy);
+      return `${px.toFixed(2)} ${py.toFixed(2)}`;
+    };
+    const fmtRect = (vx0: number, vy0: number, vx1: number, vy1: number): string => {
+      const [px0, py0] = toPdfPt(vx0, vy0);
+      const [px1, py1] = toPdfPt(vx1, vy1);
+      const rx = Math.min(px0, px1).toFixed(2);
+      const ry = Math.min(py0, py1).toFixed(2);
+      const rw = Math.abs(px1 - px0).toFixed(2);
+      const rh = Math.abs(py1 - py0).toFixed(2);
+      return `${rx} ${ry} ${rw} ${rh}`;
+    };
 
     let hasSemi = false;
     let stream = '';
@@ -645,19 +699,26 @@ export async function applyRedactions(
     // 2. 墨消し矩形の下地焼き込み（白塗りは純白 1 1 1、黒塗りは漆黒 0 0 0）
     for (const r of rectList) {
       const isWhite = (r.color || defaultColor) === 'white';
-      const col = isWhite ? '1 1 1' : '0 0 0';
-      const rx = toPdfX(r.x0).toFixed(2);
-      const ry = toPdfY(r.y1).toFixed(2);
-      const rw = (r.x1 - r.x0).toFixed(2);
-      const rh = (r.y1 - r.y0).toFixed(2);
+      const isTextSnapOrSearch =
+        r.id.startsWith('text_') || r.id.startsWith('copy_text_') || r.id.startsWith('search_');
 
+      // 確定保存・印刷時（!isDraft）かつ「白塗り＋テキスト吸着/検索」の場合は、
+      // ステップ1の物理切除で既にテキスト消去と背景画像の白抜きが完了しているため、
+      // 表の罫線を上書きして消してしまわないよう不透明白矩形の重ね塗りをスキップする
+      if (!isDraft && isWhite && isTextSnapOrSearch) {
+        continue;
+      }
+
+      const col = isWhite ? '1 1 1' : '0 0 0';
       stream += 'q\n';
       stream += `${col} rg ${col} RG\n`;
-      stream += `${rx} ${ry} ${rw} ${rh} re f\n`;
+      stream += `${fmtRect(r.x0, r.y0, r.x1, r.y1)} re f\n`;
       stream += 'Q\n';
     }
 
     // 3. 描画・校正アイテムの合成適用（白塗り等の下地の上に確実に描画）
+    let textIndex = 0;
+    let imgIndex = 0;
     for (const d of drawList) {
       const rgb = hexToRgb(d.color);
       const rStr = rgb[0].toFixed(3);
@@ -674,7 +735,7 @@ export async function applyRedactions(
 
         stream += 'q\n';
         stream += `${rStr} ${gStr} ${bStr} RG 1 J 1 j ${lw} w\n`;
-        stream += `${toPdfX(x1).toFixed(2)} ${toPdfY(y1).toFixed(2)} m ${toPdfX(x2).toFixed(2)} ${toPdfY(y2).toFixed(2)} l S\n`;
+        stream += `${fmtPt(x1, y1)} m ${fmtPt(x2, y2)} l S\n`;
 
         // 矢じりベクターの確実な焼き込み
         const mode = d.arrowHead || (d.tool === 'arrow' ? 'end' : 'none');
@@ -693,7 +754,7 @@ export async function applyRedactions(
               const ay1 = y2 - headLen * Math.sin(angle - arrowAngle);
               const ax2 = x2 - headLen * Math.cos(angle + arrowAngle);
               const ay2 = y2 - headLen * Math.sin(angle + arrowAngle);
-              stream += `${toPdfX(ax1).toFixed(2)} ${toPdfY(ay1).toFixed(2)} m ${toPdfX(x2).toFixed(2)} ${toPdfY(y2).toFixed(2)} l ${toPdfX(ax2).toFixed(2)} ${toPdfY(ay2).toFixed(2)} l S\n`;
+              stream += `${fmtPt(ax1, ay1)} m ${fmtPt(x2, y2)} l ${fmtPt(ax2, ay2)} l S\n`;
             }
 
             if (mode === 'start' || mode === 'both') {
@@ -701,7 +762,7 @@ export async function applyRedactions(
               const by1 = y1 + headLen * Math.sin(angle - arrowAngle);
               const bx2 = x1 + headLen * Math.cos(angle + arrowAngle);
               const by2 = y1 + headLen * Math.sin(angle + arrowAngle);
-              stream += `${toPdfX(bx1).toFixed(2)} ${toPdfY(by1).toFixed(2)} m ${toPdfX(x1).toFixed(2)} ${toPdfY(y1).toFixed(2)} l ${toPdfX(bx2).toFixed(2)} ${toPdfY(by2).toFixed(2)} l S\n`;
+              stream += `${fmtPt(bx1, by1)} m ${fmtPt(x1, y1)} l ${fmtPt(bx2, by2)} l S\n`;
             }
           }
         }
@@ -719,37 +780,34 @@ export async function applyRedactions(
 
         stream += 'q\n';
         stream += `${rStr} ${gStr} ${bStr} RG 1 J 1 j ${lw} w\n`;
-        stream += `${toPdfX(p1x).toFixed(2)} ${toPdfY(p1y).toFixed(2)} m ${toPdfX(p2x).toFixed(2)} ${toPdfY(p2y).toFixed(2)} l ${toPdfX(p3x).toFixed(2)} ${toPdfY(p3y).toFixed(2)} l S\n`;
+        stream += `${fmtPt(p1x, p1y)} m ${fmtPt(p2x, p2y)} l ${fmtPt(p3x, p3y)} l S\n`;
         stream += 'Q\n';
       } else if (d.tool === 'rect') {
         if (d.x === undefined || d.y === undefined || d.w === undefined || d.h === undefined) continue;
-        const rx = toPdfX(d.x).toFixed(2);
-        const ry = toPdfY(d.y + d.h).toFixed(2);
-        const rw = d.w.toFixed(2);
-        const rh = d.h.toFixed(2);
+        const rectOps = fmtRect(d.x, d.y, d.x + d.w, d.y + d.h);
         const lw = (d.lineWidth || 2).toFixed(2);
 
         stream += 'q\n';
         if (d.fillMode === 'solid') {
           stream += `${rStr} ${gStr} ${bStr} RG ${rStr} ${gStr} ${bStr} rg ${lw} w\n`;
-          stream += `${rx} ${ry} ${rw} ${rh} re B\n`;
+          stream += `${rectOps} re B\n`;
         } else if (d.fillMode === 'semi') {
           hasSemi = true;
           stream += `/GS_semi gs ${rStr} ${gStr} ${bStr} RG ${rStr} ${gStr} ${bStr} rg ${lw} w\n`;
-          stream += `${rx} ${ry} ${rw} ${rh} re B\n`;
+          stream += `${rectOps} re B\n`;
         } else {
           stream += `${rStr} ${gStr} ${bStr} RG ${lw} w\n`;
-          stream += `${rx} ${ry} ${rw} ${rh} re S\n`;
+          stream += `${rectOps} re S\n`;
         }
         stream += 'Q\n';
       } else if (d.tool === 'circle') {
         if (d.x === undefined || d.y === undefined || d.w === undefined || d.h === undefined) continue;
-        const cx = toPdfX(d.x + d.w / 2);
-        const cy = toPdfY(d.y + d.h / 2);
-        const rx = d.w / 2;
-        const ry = d.h / 2;
-        const kx = rx * 0.55228475;
-        const ky = ry * 0.55228475;
+        const vcx = d.x + d.w / 2;
+        const vcy = d.y + d.h / 2;
+        const vrx = d.w / 2;
+        const vry = d.h / 2;
+        const vkx = vrx * 0.55228475;
+        const vky = vry * 0.55228475;
         const lw = (d.lineWidth || 2).toFixed(2);
 
         stream += 'q\n';
@@ -761,11 +819,11 @@ export async function applyRedactions(
         } else {
           stream += `${rStr} ${gStr} ${bStr} RG ${lw} w\n`;
         }
-        stream += `${(cx + rx).toFixed(2)} ${cy.toFixed(2)} m\n`;
-        stream += `${(cx + rx).toFixed(2)} ${(cy + ky).toFixed(2)} ${(cx + kx).toFixed(2)} ${(cy + ry).toFixed(2)} ${cx.toFixed(2)} ${(cy + ry).toFixed(2)} c\n`;
-        stream += `${(cx - kx).toFixed(2)} ${(cy + ry).toFixed(2)} ${(cx - rx).toFixed(2)} ${(cy + ky).toFixed(2)} ${(cx - rx).toFixed(2)} ${cy.toFixed(2)} c\n`;
-        stream += `${(cx - rx).toFixed(2)} ${(cy - ky).toFixed(2)} ${(cx - kx).toFixed(2)} ${(cy - ry).toFixed(2)} ${cx.toFixed(2)} ${(cy - ry).toFixed(2)} c\n`;
-        stream += `${(cx + kx).toFixed(2)} ${(cy - ry).toFixed(2)} ${(cx + rx).toFixed(2)} ${(cy - ky).toFixed(2)} ${(cx + rx).toFixed(2)} ${cy.toFixed(2)} c\n`;
+        stream += `${fmtPt(vcx + vrx, vcy)} m\n`;
+        stream += `${fmtPt(vcx + vrx, vcy - vky)} ${fmtPt(vcx + vkx, vcy - vry)} ${fmtPt(vcx, vcy - vry)} c\n`;
+        stream += `${fmtPt(vcx - vkx, vcy - vry)} ${fmtPt(vcx - vrx, vcy - vky)} ${fmtPt(vcx - vrx, vcy)} c\n`;
+        stream += `${fmtPt(vcx - vrx, vcy + vky)} ${fmtPt(vcx - vkx, vcy + vry)} ${fmtPt(vcx, vcy + vry)} c\n`;
+        stream += `${fmtPt(vcx + vkx, vcy + vry)} ${fmtPt(vcx + vrx, vcy + vky)} ${fmtPt(vcx + vrx, vcy)} c\n`;
         stream += d.fillMode === 'solid' || d.fillMode === 'semi' ? 'B\n' : 'S\n';
         stream += 'Q\n';
       } else if (d.tool === 'polygon') {
@@ -781,16 +839,16 @@ export async function applyRedactions(
         } else {
           stream += `${rStr} ${gStr} ${bStr} RG ${lw} w\n`;
         }
-        stream += `${toPdfX(d.points[0].x).toFixed(2)} ${toPdfY(d.points[0].y).toFixed(2)} m\n`;
+        stream += `${fmtPt(d.points[0].x, d.points[0].y)} m\n`;
         for (let p = 1; p < d.points.length; p++) {
-          stream += `${toPdfX(d.points[p].x).toFixed(2)} ${toPdfY(d.points[p].y).toFixed(2)} l\n`;
+          stream += `${fmtPt(d.points[p].x, d.points[p].y)} l\n`;
         }
         stream += `h ${d.fillMode === 'solid' || d.fillMode === 'semi' ? 'B' : 'S'}\n`;
         stream += 'Q\n';
       } else if (d.tool === 'text') {
         if (d.x === undefined || d.y === undefined || !d.text) continue;
         const fontPx = d.fontSize || 16;
-        const estW = d.text.length * fontPx * 1.2 + 20;
+        const estW = Math.max(fontPx * 2, d.text.length * fontPx * 1.2 + 20);
         const estH = fontPx + 10;
         const rotDeg = d.rotation || 0;
 
@@ -800,140 +858,164 @@ export async function applyRedactions(
           stream += '1 1 1 rg 1 1 1 RG\n';
 
           if (rotDeg !== 0) {
-            const pdfRad = -(rotDeg * Math.PI) / 180;
-            const cos = Math.cos(pdfRad).toFixed(6);
-            const sin = Math.sin(pdfRad).toFixed(6);
-            const negSin = (-Math.sin(pdfRad)).toFixed(6);
-            const centerX = d.x - 2 + estW / 2;
-            const centerY = d.y - fontPx + 2 + estH / 2;
-            const pdfCx = toPdfX(centerX);
-            const pdfCy = toPdfY(centerY);
-
-            stream += `${cos} ${sin} ${negSin} ${cos} ${pdfCx.toFixed(2)} ${pdfCy.toFixed(2)} cm\n`;
-            stream += `${(-estW / 2).toFixed(2)} ${(-estH / 2).toFixed(2)} ${estW.toFixed(2)} ${estH.toFixed(2)} re f\n`;
+            const rad = (rotDeg * Math.PI) / 180;
+            const cos = Math.cos(rad);
+            const sin = Math.sin(rad);
+            const vcx = d.x - 2 + estW / 2;
+            const vcy = d.y - fontPx + 2 + estH / 2;
+            const corners: [number, number][] = [
+              [-estW / 2, -estH / 2],
+              [estW / 2, -estH / 2],
+              [estW / 2, estH / 2],
+              [-estW / 2, estH / 2],
+            ].map(([dx, dy]) => [
+              vcx + dx * cos - dy * sin,
+              vcy + dx * sin + dy * cos,
+            ]);
+            stream += `${fmtPt(corners[0][0], corners[0][1])} m\n`;
+            stream += `${fmtPt(corners[1][0], corners[1][1])} l\n`;
+            stream += `${fmtPt(corners[2][0], corners[2][1])} l\n`;
+            stream += `${fmtPt(corners[3][0], corners[3][1])} l\n`;
+            stream += 'h f\n';
           } else {
-            stream += `${toPdfX(d.x - 2).toFixed(2)} ${toPdfY(d.y + 4).toFixed(2)} ${estW.toFixed(2)} ${estH.toFixed(2)} re f\n`;
+            stream += `${fmtRect(d.x - 2, d.y - fontPx + 2, d.x - 2 + estW, d.y + 4)} re f\n`;
           }
 
           stream += 'Q\n';
         }
 
-        // テキスト注釈（CJK対応フォント Heiti を指定し日本語でも指定色を100%保持）
+        // テキスト描画：MuPDFのFreeText外観生成エンジンでCJK対応フォント（Heiti）のForm XObjectを生成し、
+        // 注釈の背景色（/C）による黒塗りマスク化や印刷プレビューでの不整合を100%防ぐため、
+        // 生成した外観 Form XObject (AP/N) をページの Contents ストリームに直接 Do 描画して注釈自体は削除する
         const annot = page.createAnnotation('FreeText');
         annot.setRect([d.x, d.y - fontPx, d.x + estW, d.y + 10]);
         annot.setContents(d.text);
-        annot.setColor(rgb);
+        annot.setBorderWidth(0);
         annot.setDefaultAppearance('Heiti', fontPx, rgb);
+        annot.setFlags(4);
         annot.update();
-        if (isDraft) {
-          annot.getObject().put('GV_Draft', doc.newBoolean(true));
+
+        try {
+          const apN = annot.getObject().resolve().get('AP')?.get('N');
+          if (apN && !apN.isNull()) {
+            const ftName = isDraft
+              ? `FT_Draft_${i}_${textIndex++}`
+              : `FT_${i}_${textIndex++}`;
+
+            let res = pageObj.get('Resources');
+            if (!res || res.isNull()) {
+              res = doc.newDictionary();
+              pageObj.put('Resources', res);
+            }
+            let xobjs = res.get('XObject');
+            if (!xobjs || xobjs.isNull()) {
+              xobjs = doc.newDictionary();
+              res.put('XObject', xobjs);
+            }
+            xobjs.put(ftName, apN);
+
+            stream += 'q\n';
+            if (rotDeg !== 0) {
+              const pdfRad = -(rotDeg * Math.PI) / 180;
+              const cos = Math.cos(pdfRad);
+              const sin = Math.sin(pdfRad);
+              const [pcx, pcy] = toPdfPt(d.x + estW / 2, d.y - fontPx / 2);
+              const e = pcx - pcx * cos + pcy * sin;
+              const f = pcy - pcx * sin - pcy * cos;
+              stream += `${cos.toFixed(6)} ${sin.toFixed(6)} ${(-sin).toFixed(6)} ${cos.toFixed(6)} ${e.toFixed(2)} ${f.toFixed(2)} cm\n`;
+            }
+            stream += `/${ftName} Do\n`;
+            stream += 'Q\n';
+          }
+        } catch (err) {
+          console.error('Failed to bake FreeText Form XObject:', err);
+        } finally {
+          page.deleteAnnotation(annot);
         }
-
-        // テキスト回転の適用
-        if (rotDeg !== 0) {
-          const normRot = ((rotDeg % 360) + 360) % 360;
-          if (normRot % 90 === 0) {
-            annot.getObject().put('Rotate', doc.newInteger(normRot));
-          } else {
-            try {
-              const apN = annot.getObject().resolve().get('AP')?.get('N');
-              if (apN && !apN.isNull()) {
-                const pdfRad = -(rotDeg * Math.PI) / 180;
-                const cos = Math.cos(pdfRad);
-                const sin = Math.sin(pdfRad);
-                const cx = toPdfX(d.x + estW / 2);
-                const cy = toPdfY(d.y - fontPx / 2);
-                const e = cx - cx * cos + cy * sin;
-                const f = cy - cx * sin - cy * cos;
-
-                const matArr = doc.newArray();
-                matArr.push(doc.newReal(cos));
-                matArr.push(doc.newReal(sin));
-                matArr.push(doc.newReal(-sin));
-                matArr.push(doc.newReal(cos));
-                matArr.push(doc.newReal(e));
-                matArr.push(doc.newReal(f));
-                apN.put('Matrix', matArr);
-              }
-            } catch (err) {
-              console.error('Failed to set annotation rotation matrix:', err);
+      } else if (
+        d.tool === 'image' &&
+        (d.imageBytes || d.imageUrl) &&
+        d.x !== undefined &&
+        d.y !== undefined &&
+        d.w !== undefined &&
+        d.h !== undefined
+      ) {
+        // 画像アイテムの物理合成（XObject登録 ＆ Contentsストリームへの埋め込み）
+        try {
+          let u8Bytes = d.imageBytes;
+          if (!u8Bytes && d.imageUrl && d.imageUrl.startsWith('data:')) {
+            const base64Part = d.imageUrl.split(',')[1];
+            const bin = atob(base64Part);
+            u8Bytes = new Uint8Array(bin.length);
+            for (let k = 0; k < bin.length; k++) {
+              u8Bytes[k] = bin.charCodeAt(k);
             }
           }
-        }
-      }
 
-      // 画像アイテムの物理合成（XObject登録 ＆ Contentsストリームへの埋め込み）
-      let imgIndex = 0;
-      for (const d of drawList) {
-        if (
-          d.tool === 'image' &&
-          (d.imageBytes || d.imageUrl) &&
-          d.x !== undefined &&
-          d.y !== undefined &&
-          d.w !== undefined &&
-          d.h !== undefined
-        ) {
-          try {
-            let u8Bytes = d.imageBytes;
-            if (!u8Bytes && d.imageUrl && d.imageUrl.startsWith('data:')) {
-              const base64Part = d.imageUrl.split(',')[1];
-              const bin = atob(base64Part);
-              u8Bytes = new Uint8Array(bin.length);
-              for (let k = 0; k < bin.length; k++) {
-                u8Bytes[k] = bin.charCodeAt(k);
-              }
+          if (u8Bytes) {
+            const img = new m.Image(u8Bytes);
+            const imgObj = doc.addImage(img);
+            img.destroy();
+            const imgName = isDraft
+              ? `ImG_Draft_${i}_${imgIndex++}`
+              : `ImG_${i}_${imgIndex++}`;
+
+            let res = pageObj.get('Resources');
+            if (!res || res.isNull()) {
+              res = doc.newDictionary();
+              pageObj.put('Resources', res);
+            }
+            let xobjs = res.get('XObject');
+            if (!xobjs || xobjs.isNull()) {
+              xobjs = doc.newDictionary();
+              res.put('XObject', xobjs);
+            }
+            xobjs.put(imgName, imgObj);
+
+            // 視覚空間での画像の左下・右下・左上を toPdfPt で PDF 座標へ変換（ページ回転・画像回転に完全対応）
+            const vx0 = d.x;
+            const vy0 = d.y;
+            const vx1 = d.x + d.w;
+            const vy1 = d.y + d.h;
+            const rot = d.rotation || 0;
+
+            let pLL: [number, number];
+            let pLR: [number, number];
+            let pUL: [number, number];
+
+            if (rot !== 0) {
+              const rad = (rot * Math.PI) / 180;
+              const cos = Math.cos(rad);
+              const sin = Math.sin(rad);
+              const vcx = d.x + d.w / 2;
+              const vcy = d.y + d.h / 2;
+              const rotV = (vx: number, vy: number): [number, number] => [
+                vcx + (vx - vcx) * cos - (vy - vcy) * sin,
+                vcy + (vx - vcx) * sin + (vy - vcy) * cos,
+              ];
+              pLL = toPdfPt(...rotV(vx0, vy1));
+              pLR = toPdfPt(...rotV(vx1, vy1));
+              pUL = toPdfPt(...rotV(vx0, vy0));
+            } else {
+              pLL = toPdfPt(vx0, vy1);
+              pLR = toPdfPt(vx1, vy1);
+              pUL = toPdfPt(vx0, vy0);
             }
 
-            if (u8Bytes) {
-              const img = new m.Image(u8Bytes);
-              const imgObj = doc.addImage(img);
-              img.destroy();
-              const imgName = isDraft
-                ? `ImG_Draft_${i}_${imgIndex++}`
-                : `ImG_${i}_${imgIndex++}`;
+            const a = pLR[0] - pLL[0];
+            const b = pLR[1] - pLL[1];
+            const c = pUL[0] - pLL[0];
+            const dCoeff = pUL[1] - pLL[1];
+            const e = pLL[0];
+            const f = pLL[1];
 
-              let res = pageObj.get('Resources');
-              if (!res || res.isNull()) {
-                res = doc.newDictionary();
-                pageObj.put('Resources', res);
-              }
-              let xobjs = res.get('XObject');
-              if (!xobjs || xobjs.isNull()) {
-                xobjs = doc.newDictionary();
-                res.put('XObject', xobjs);
-              }
-              xobjs.put(imgName, imgObj);
-
-              // 座標変換 (PDF座標系: 左下原点)
-              const pdfX = toPdfX(d.x);
-              const pdfY = toPdfY(d.y + d.h);
-              const pdfW = d.w;
-              const pdfH = d.h;
-              const rot = d.rotation || 0;
-
-              stream += 'q\n';
-              if (rot === 0) {
-                stream += `${pdfW.toFixed(2)} 0 0 ${pdfH.toFixed(2)} ${pdfX.toFixed(2)} ${pdfY.toFixed(2)} cm\n`;
-              } else {
-                const rad = (-rot * Math.PI) / 180;
-                const cos = Math.cos(rad);
-                const sin = Math.sin(rad);
-                const cx = pdfX + pdfW / 2;
-                const cy = pdfY + pdfH / 2;
-                const a = pdfW * cos;
-                const b = pdfW * sin;
-                const c = -pdfH * sin;
-                const dCoeff = pdfH * cos;
-                const e = cx - (pdfW * cos - pdfH * sin) / 2;
-                const f = cy - (pdfW * sin + pdfH * cos) / 2;
-                stream += `${a.toFixed(2)} ${b.toFixed(2)} ${c.toFixed(2)} ${dCoeff.toFixed(2)} ${e.toFixed(2)} ${f.toFixed(2)} cm\n`;
-              }
-              stream += `/${imgName} Do\n`;
-              stream += 'Q\n';
-            }
-          } catch (imgErr) {
-            console.error('画像ベイクエラー:', imgErr);
+            stream += 'q\n';
+            stream += `${a.toFixed(2)} ${b.toFixed(2)} ${c.toFixed(2)} ${dCoeff.toFixed(2)} ${e.toFixed(2)} ${f.toFixed(2)} cm\n`;
+            stream += `/${imgName} Do\n`;
+            stream += 'Q\n';
           }
+        } catch (imgErr) {
+          console.error('画像ベイクエラー:', imgErr);
         }
       }
     }
@@ -962,10 +1044,10 @@ export async function applyRedactions(
       if (isDraft) {
         streamDict.put('GV_Draft', doc.newBoolean(true));
       }
-      const streamObj = doc.addStream(new TextEncoder().encode(stream), streamDict);
 
       const contents = pageObj.get('Contents');
       if (!contents || contents.isNull()) {
+        const streamObj = doc.addStream(new TextEncoder().encode(stream), streamDict);
         if (isDraft) {
           const arr = doc.newArray();
           arr.push(streamObj);
@@ -973,9 +1055,30 @@ export async function applyRedactions(
         } else {
           pageObj.put('Contents', streamObj);
         }
+      } else if (isDraft) {
+        // 一時保存時は物理切除（ストリーム正規化）を行わないため、
+        // 元PDFの Contents 前後を q ... Q で囲んで座標変換行列（cm）の汚染から保護する
+        const qDict = doc.newDictionary();
+        qDict.put('GV_Draft', doc.newBoolean(true));
+        const qPreObj = doc.addStream(new TextEncoder().encode('q\n'), qDict);
+        const streamObj = doc.addStream(new TextEncoder().encode('Q\n' + stream), streamDict);
+
+        const arr = doc.newArray();
+        arr.push(qPreObj);
+        if (contents.isArray()) {
+          for (let cIdx = 0; cIdx < contents.length; cIdx++) {
+            arr.push(contents.get(cIdx));
+          }
+        } else {
+          arr.push(contents);
+        }
+        arr.push(streamObj);
+        pageObj.put('Contents', arr);
       } else if (contents.isArray()) {
+        const streamObj = doc.addStream(new TextEncoder().encode(stream), streamDict);
         contents.push(streamObj);
       } else {
+        const streamObj = doc.addStream(new TextEncoder().encode(stream), streamDict);
         const arr = doc.newArray();
         arr.push(contents);
         arr.push(streamObj);
@@ -1178,13 +1281,17 @@ export async function extractEditableState(
         }
       }
 
-      // 4. Resources.XObject から一時画像 ImG_Draft_* を除去
+      // 4. Resources.XObject から一時画像 ImG_Draft_* および一時テキスト FT_Draft_* を除去
       const xobjs = pageObj.get('Resources')?.get('XObject');
       if (xobjs && !xobjs.isNull()) {
-        for (let k = 0; k < 50; k++) {
-          const key = `ImG_Draft_${i}_${k}`;
-          if (xobjs.get(key) && !xobjs.get(key).isNull()) {
-            xobjs.delete(key);
+        for (let k = 0; k < 100; k++) {
+          const imgKey = `ImG_Draft_${i}_${k}`;
+          if (xobjs.get(imgKey) && !xobjs.get(imgKey).isNull()) {
+            xobjs.delete(imgKey);
+          }
+          const ftKey = `FT_Draft_${i}_${k}`;
+          if (xobjs.get(ftKey) && !xobjs.get(ftKey).isNull()) {
+            xobjs.delete(ftKey);
           }
         }
       }
