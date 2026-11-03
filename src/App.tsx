@@ -25,6 +25,7 @@ import {
 } from './utils/mupdfService'
 import {
   AppMode,
+  WorkspaceMode,
   DrawingTool,
   FillMode,
   ArrowHead,
@@ -42,7 +43,19 @@ import {
   Lock,
   Eraser,
   CheckCircle2,
+  PenTool,
+  FolderKanban,
+  Minimize2,
+  Download,
+  Layers,
 } from 'lucide-react'
+
+function formatBytes(bytes?: number | null): string {
+  if (!bytes || bytes <= 0) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+}
 
 export default function App() {
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null)
@@ -64,6 +77,17 @@ export default function App() {
 
   // 抽出対象として選択中のページセット
   const [selectedPagesForExtract, setSelectedPagesForExtract] = useState<Set<number>>(new Set())
+
+  // ワークスペースモード ('redact' | 'draw' | 'organize' | 'optimize') と入り口画面フラグ
+  const [isHomeScreen, setIsHomeScreen] = useState<boolean>(true)
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('redact')
+  const pendingEntryModeRef = useRef<WorkspaceMode | null>(null)
+  const [optimizeLevel, setOptimizeLevel] = useState<CompactLevel>('standard')
+  const [lastOptimizeResult, setLastOptimizeResult] = useState<{
+    originalSize: number;
+    compactedSize: number;
+    optimizedImagesCount: number;
+  } | null>(null)
 
   // 描画・校正モード用 state
   const [appMode, setAppMode] = useState<AppMode>('eraser')
@@ -116,6 +140,9 @@ export default function App() {
 
   // 作業机の state (初期状態は閉じた状態 false: これまでの通常使用を完全維持)
   const [isDeskOpen, setIsDeskOpen] = useState<boolean>(false)
+  // deskSourceItems: 左ペイン（素材プール: 読み込んだ全PDFファイルとその全ページ）
+  const [deskSourceItems, setDeskSourceItems] = useState<DeskItem[]>([])
+  // deskItems: 右ペイン（編纂ワークスペース: 抽出・結合対象のページ群）
   const [deskItems, setDeskItems] = useState<DeskItem[]>([])
   const [deskDocs, setDeskDocs] = useState<Map<string, DeskDoc>>(new Map())
 
@@ -299,16 +326,65 @@ export default function App() {
     }
   }, [zoom, currentPage, pdfBytes, docInfo, pageRotations])
 
+  // ワークスペースモードの切り替えと連動状態の適用
+  const handleWorkspaceModeChange = (mode: WorkspaceMode) => {
+    setWorkspaceMode(mode)
+    setIsHomeScreen(false)
+    if (mode === 'redact') {
+      setAppMode('eraser')
+    } else if (mode === 'draw') {
+      setAppMode('draw')
+      if (activeTool === 'pan') {
+        setActiveTool('text')
+      }
+    } else if (mode === 'organize') {
+      setIsDeskOpen(true)
+    } else if (mode === 'optimize') {
+      setLastOptimizeResult(null)
+    }
+  }
+
+  // 入り口カードをクリックしたときに、そのモードの専用画面を立ち上げる
+  const enterWorkspaceMode = (mode: WorkspaceMode) => {
+    handleWorkspaceModeChange(mode)
+    setIsHomeScreen(false)
+  }
+
+  // 指定モードでPDFファイル群を開く
+  const openFilesInMode = async (files: FileList | File[], mode: WorkspaceMode) => {
+    const validFiles = Array.from(files).filter(
+      (f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')
+    )
+    if (validFiles.length === 0) {
+      alert('PDFファイルを選択またはドロップしてください。')
+      return
+    }
+    handleWorkspaceModeChange(mode)
+    setIsHomeScreen(false)
+    setLastOptimizeResult(null)
+
+    if (mode === 'organize') {
+      // 作業机モードでは、選択・ドロップされたPDFファイル群をそのまま作業机に投入する
+      const dt = new DataTransfer()
+      validFiles.forEach((f) => dt.items.add(f))
+      await handleAddPdfFilesToDesk(dt.files)
+      return
+    }
+
+    await loadPdf(validFiles[0])
+  }
+
+  // ファイル選択ダイアログ起動
+  const triggerFileOpenWithMode = (mode: WorkspaceMode) => {
+    pendingEntryModeRef.current = mode
+    fileInputRef.current?.click()
+  }
+
   // ファイルドラッグ＆ドロップ受付
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      const file = e.dataTransfer.files[0]
-      if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
-        loadPdf(file)
-      } else {
-        alert('PDFファイルをドロップしてください。')
-      }
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      openFilesInMode(e.dataTransfer.files, workspaceMode)
     }
   }
 
@@ -519,46 +595,48 @@ export default function App() {
 
   // 元に戻す (Undo)
   const handleUndo = () => {
-    setHistory((prev) => {
-      if (prev.length === 0) return prev
-      const newHist = [...prev]
-      const action = newHist.pop()!
+    if (history.length === 0) return
+    const newHist = [...history]
+    const action = newHist.pop()!
 
-      switch (action.type) {
-        case 'add_redaction':
-          setRedactions((r) => r.filter((item) => item.id !== action.redactionId))
-          break
-        case 'add_redactions':
-          setRedactions((r) => r.filter((item) => !action.redactionIds.includes(item.id)))
-          break
-        case 'remove_redaction':
-          setRedactions((r) => [...r, action.redaction])
-          break
-        case 'add_drawing':
-          setDrawings((d) => d.filter((item) => item.id !== action.drawingId))
-          break
-        case 'remove_drawing':
-          setDrawings((d) => [...d, action.drawing])
-          break
-        case 'move_drawing':
-          setDrawings((prev) =>
-            prev.map((item) => (item.id === action.id ? { ...item, ...action.prev } : item))
-          )
-          break
-        case 'clear_page':
-        case 'clear_all':
-          setRedactions((r) => [...r, ...action.redactions])
-          setDrawings((d) => [...d, ...action.drawings])
-          break
-      }
-      showToast('↩️ 直前の操作を元に戻しました。')
-      return newHist
-    })
+    switch (action.type) {
+      case 'add_redaction':
+        setRedactions((r) => r.filter((item) => item.id !== action.redactionId))
+        break
+      case 'add_redactions':
+        setRedactions((r) => r.filter((item) => !action.redactionIds.includes(item.id)))
+        break
+      case 'remove_redaction':
+        setRedactions((r) => [...r, action.redaction])
+        break
+      case 'add_drawing':
+        setDrawings((d) => d.filter((item) => item.id !== action.drawingId))
+        break
+      case 'remove_drawing':
+        setDrawings((d) => [...d, action.drawing])
+        break
+      case 'move_drawing':
+        setDrawings((prev) =>
+          prev.map((item) => (item.id === action.id ? { ...item, ...action.prev } : item))
+        )
+        break
+      case 'clear_page':
+      case 'clear_all':
+        setRedactions((r) => [...r, ...action.redactions])
+        setDrawings((d) => [...d, ...action.drawings])
+        break
+    }
+    setHistory(newHist)
+    showToast('↩️ 直前の操作を元に戻しました。')
   }
 
   // キーボードショートカット (Ctrl+Z / Cmd+Z で Undo)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const activeTag = document.activeElement?.tagName?.toLowerCase()
+      if (activeTag === 'input' || activeTag === 'textarea') {
+        return
+      }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
         if (!e.shiftKey) {
           e.preventDefault()
@@ -568,7 +646,7 @@ export default function App() {
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [])
+  }, [history])
 
   // キーワード一括検索消しゴム
   const handleKeywordSearch = async (keyword: string, searchAllPages: boolean) => {
@@ -1267,6 +1345,7 @@ export default function App() {
     }
 
     setDeskItems((prev) => [...prev, newItem])
+    setDeskSourceItems((prev) => [...prev, newItem])
     setIsDeskOpen(true)
     showToast(`p.${pageIdx + 1} を作業机に追加しました`)
   }
@@ -1292,6 +1371,7 @@ export default function App() {
     })
 
     setDeskItems((prev) => [...prev, ...newItems])
+    setDeskSourceItems((prev) => [...prev, ...newItems])
     setIsDeskOpen(true)
     showToast(`${indices.length} ページを作業机に追加しました`)
   }
@@ -1374,9 +1454,10 @@ export default function App() {
         newDocs.forEach((d) => next.set(d.id, d))
         return next
       })
-      setDeskItems((prev) => [...prev, ...newItems])
+      // 素材プール（左ペイン）に投入
+      setDeskSourceItems((prev) => [...prev, ...newItems])
       setIsDeskOpen(true)
-      showToast(`${files.length} 件のPDF（計 ${newItems.length} 頁）を作業机に追加しました`)
+      showToast(`${files.length} 件のPDF（計 ${newItems.length} 頁）を読み込みました`)
     } catch (err) {
       console.error('外部PDF追加エラー:', err)
       alert('PDFファイルの追加に失敗しました。')
@@ -1385,7 +1466,109 @@ export default function App() {
     }
   }
 
-  // 作業机アイテムの並べ替え
+  // 素材プールから編纂ワークスペースへのページ抽出（追加）
+  const handleExtractItemsToDesk = (itemsToExtract: DeskItem[], targetIndex?: number) => {
+    if (itemsToExtract.length === 0) return
+    const clones: DeskItem[] = itemsToExtract.map((it) => ({
+      ...it,
+      id: `extract_${Date.now()}_${Math.random().toString(36).substring(2, 7)}_${it.pageIndex}`,
+    }))
+    setDeskItems((prev) => {
+      if (typeof targetIndex === 'number' && targetIndex >= 0 && targetIndex <= prev.length) {
+        const next = [...prev]
+        next.splice(targetIndex, 0, ...clones)
+        return next
+      }
+      return [...prev, ...clones]
+    })
+    showToast(`📑 ${clones.length} ページを編纂ワークスペースに抽出しました`)
+  }
+
+  // 作業机の特定のPDFファイル単体を直接メイン画面（墨消し・描画モード）の作業対象として開く
+  const handleLoadSingleDeskDoc = async (docId: string, targetMode: WorkspaceMode = 'redact') => {
+    const doc = deskDocs.get(docId)
+    if (!doc) return
+    const hasUnsaved = redactions.length > 0 || drawings.length > 0
+    if (
+      hasUnsaved &&
+      !window.confirm(
+        `「${doc.name}」を作業対象として開きますか？\n（現在編集中の墨消しや描画はリセットされます）`
+      )
+    ) {
+      return
+    }
+
+    try {
+      setIsProcessing(true)
+      const file = new File([doc.bytes as BlobPart], doc.name, {
+        type: 'application/pdf',
+      })
+      await loadPdf(file)
+      setIsDeskOpen(false)
+      handleWorkspaceModeChange(targetMode)
+      showToast(`✨ 「${doc.name}」を作業対象として読み込みました！`)
+    } catch (err) {
+      console.error('個別ファイル読み込みエラー:', err)
+      alert('ファイルの読み込みに失敗しました。')
+    } finally {
+      setIsProcessing(false)
+    }
+  }
+
+  // 素材プール（左ペイン）アイテムの一括回転・一括削除
+  const handleRotateSourceItems = (itemIds: string[]) => {
+    const set = new Set(itemIds)
+    setDeskSourceItems((prev) =>
+      prev.map((it) => (set.has(it.id) ? { ...it, rotation: (it.rotation + 90) % 360 } : it))
+    )
+  }
+  const handleRemoveSourceItems = (itemIds: string[]) => {
+    const set = new Set(itemIds)
+    setDeskSourceItems((prev) => prev.filter((it) => !set.has(it.id)))
+    showToast(`🗑️ 選択した ${itemIds.length} ページを素材から削除しました`)
+  }
+  const handleRotateSourceGroup = (startIndex: number, endIndex: number) => {
+    setDeskSourceItems((prev) =>
+      prev.map((it, idx) =>
+        idx >= startIndex && idx <= endIndex ? { ...it, rotation: (it.rotation + 90) % 360 } : it
+      )
+    )
+    showToast(`📄 ファイル内の全 ${endIndex - startIndex + 1} ページを一括で90°回転しました`)
+  }
+  const handleRemoveSourceGroup = (startIndex: number, endIndex: number) => {
+    const count = endIndex - startIndex + 1
+    setDeskSourceItems((prev) => prev.filter((_, idx) => idx < startIndex || idx > endIndex))
+    showToast(`🗑️ ファイル（${count} ページ）を作業机から外しました`)
+  }
+  const handleMoveSourceGroupToIndex = (fromGroupIdx: number, toGroupIdx: number) => {
+    if (fromGroupIdx === toGroupIdx) return
+    setDeskSourceItems((prev) => {
+      const groups: DeskItem[][] = []
+      for (let i = 0; i < prev.length; i++) {
+        const it = prev[i]
+        const lastGroup = groups[groups.length - 1]
+        if (lastGroup && lastGroup[0].docId === it.docId) {
+          lastGroup.push(it)
+        } else {
+          groups.push([it])
+        }
+      }
+      if (
+        fromGroupIdx < 0 ||
+        fromGroupIdx >= groups.length ||
+        toGroupIdx < 0 ||
+        toGroupIdx >= groups.length
+      ) {
+        return prev
+      }
+      const [movedGroup] = groups.splice(fromGroupIdx, 1)
+      groups.splice(toGroupIdx, 0, movedGroup)
+      return groups.flat()
+    })
+    showToast(`🗂️ ファイルの順序を入れ替えました`)
+  }
+
+  // 編纂ワークスペース（右ペイン）アイテムの並べ替え
   const handleMoveDeskItem = (fromIdx: number, toIdx: number) => {
     setDeskItems((prev) => {
       if (toIdx < 0 || toIdx >= prev.length) return prev
@@ -1396,7 +1579,7 @@ export default function App() {
     })
   }
 
-  // 作業机アイテムの90度回転
+  // 編纂ワークスペースアイテムの90度回転
   const handleRotateDeskItem = (id: string) => {
     setDeskItems((prev) =>
       prev.map((item) =>
@@ -1405,14 +1588,110 @@ export default function App() {
     )
   }
 
-  // 作業机アイテムの削除
+  // 編纂ワークスペースアイテムの削除
   const handleRemoveDeskItem = (id: string) => {
     setDeskItems((prev) => prev.filter((item) => item.id !== id))
+  }
+
+  // 編纂ワークスペースアイテムの一括回転・一括削除
+  const handleRotateTargetItems = (itemIds: string[]) => {
+    const set = new Set(itemIds)
+    setDeskItems((prev) =>
+      prev.map((it) => (set.has(it.id) ? { ...it, rotation: (it.rotation + 90) % 360 } : it))
+    )
+  }
+  const handleRemoveTargetItems = (itemIds: string[]) => {
+    const set = new Set(itemIds)
+    setDeskItems((prev) => prev.filter((it) => !set.has(it.id)))
+    showToast(`🗑️ 選択した ${itemIds.length} ページを作業机から削除しました`)
+  }
+
+  // 作業机のファイル単位グループ順序入れ替え (startIndex .. endIndex の塊を前後のファイル塊と入れ替える)
+  const handleMoveDeskGroup = (startIndex: number, endIndex: number, direction: 'up' | 'down') => {
+    setDeskItems((prev) => {
+      if (startIndex < 0 || endIndex >= prev.length || startIndex > endIndex) return prev
+      const next = [...prev]
+      const currentSlice = next.slice(startIndex, endIndex + 1)
+
+      if (direction === 'up') {
+        if (startIndex === 0) return prev
+        const prevEnd = startIndex - 1
+        const prevDocId = next[prevEnd].docId
+        let prevStart = prevEnd
+        while (prevStart > 0 && next[prevStart - 1].docId === prevDocId) {
+          prevStart--
+        }
+        const prevSlice = next.slice(prevStart, prevEnd + 1)
+        next.splice(prevStart, prevSlice.length + currentSlice.length, ...currentSlice, ...prevSlice)
+        return next
+      } else {
+        if (endIndex >= next.length - 1) return prev
+        const nextStart = endIndex + 1
+        const nextDocId = next[nextStart].docId
+        let nextEnd = nextStart
+        while (nextEnd < next.length - 1 && next[nextEnd + 1].docId === nextDocId) {
+          nextEnd++
+        }
+        const nextSlice = next.slice(nextStart, nextEnd + 1)
+        next.splice(startIndex, currentSlice.length + nextSlice.length, ...nextSlice, ...currentSlice)
+        return next
+      }
+    })
+  }
+
+  // 作業机のファイル単位グループ内全ページ一括90度回転
+  const handleRotateDeskGroup = (startIndex: number, endIndex: number) => {
+    setDeskItems((prev) =>
+      prev.map((item, idx) =>
+        idx >= startIndex && idx <= endIndex
+          ? { ...item, rotation: (item.rotation + 90) % 360 }
+          : item
+      )
+    )
+    showToast(`📄 ファイル内の全 ${endIndex - startIndex + 1} ページを一括で90°回転しました`)
+  }
+
+  // 作業机のファイル単位グループの任意位置への移動（マウスドラッグ＆ドロップ用）
+  const handleMoveDeskGroupToIndex = (fromGroupIdx: number, toGroupIdx: number) => {
+    if (fromGroupIdx === toGroupIdx) return
+    setDeskItems((prev) => {
+      // 連続する同一 docId ごとにグループ分け
+      const groups: DeskItem[][] = []
+      for (let i = 0; i < prev.length; i++) {
+        const it = prev[i]
+        const lastGroup = groups[groups.length - 1]
+        if (lastGroup && lastGroup[0].docId === it.docId) {
+          lastGroup.push(it)
+        } else {
+          groups.push([it])
+        }
+      }
+      if (
+        fromGroupIdx < 0 ||
+        fromGroupIdx >= groups.length ||
+        toGroupIdx < 0 ||
+        toGroupIdx >= groups.length
+      ) {
+        return prev
+      }
+      const [movedGroup] = groups.splice(fromGroupIdx, 1)
+      groups.splice(toGroupIdx, 0, movedGroup)
+      return groups.flat()
+    })
+    showToast(`🗂️ ファイルの順序を入れ替えました`)
+  }
+
+  // 作業机のファイル単位グループ一括削除
+  const handleRemoveDeskGroup = (startIndex: number, endIndex: number) => {
+    const count = endIndex - startIndex + 1
+    setDeskItems((prev) => prev.filter((_, idx) => idx < startIndex || idx > endIndex))
+    showToast(`🗑️ ファイル（${count} ページ）を作業机から外しました`)
   }
 
   // 作業机全クリア
   const handleClearAllDesk = () => {
     setDeskItems([])
+    showToast('🧹 編纂ワークスペースをクリアしました')
   }
 
   // 作業机の編纂PDFを出力ダウンロード
@@ -1440,10 +1719,11 @@ export default function App() {
     }
   }
 
-  // 作業机の編纂PDFをメイン画面で作業対象として開く
+  // 作業机の編纂PDFをメイン画面（墨消し・描画モード）で作業対象として開く
   const handleLoadDeskAsCurrentDoc = async () => {
     if (deskItems.length === 0) return
-    if (!window.confirm('作業机で編纂した内容をメイン画面で開きますか？\n（現在の墨消しや描画はリセットされます）')) return
+    const hasUnsaved = redactions.length > 0 || drawings.length > 0
+    if (hasUnsaved && !window.confirm('作業机で編纂した内容をメイン画面で開きますか？\n（現在編集中の墨消しや描画はリセットされます）')) return
 
     try {
       setIsProcessing(true)
@@ -1452,7 +1732,9 @@ export default function App() {
         type: 'application/pdf',
       })
       await loadPdf(file)
-      showToast('編纂したPDFをメイン画面に読み込みました')
+      setIsDeskOpen(false)
+      handleWorkspaceModeChange('redact')
+      showToast('✨ 作業机で編纂したPDFをメイン画面に読み込みました！このまま墨消しや描画・計測が行えます。')
     } catch (err) {
       console.error('メイン読み込みエラー:', err)
       alert('編纂PDFの読み込みに失敗しました。')
@@ -1470,10 +1752,17 @@ export default function App() {
     }
   }
 
-  // リセット
+  // 入り口（初期画面）へ戻る・リセット
   const handleReset = () => {
-    if (window.confirm('現在の設定をリセットして別のPDFを開きますか？')) {
+    const hasUnsaved =
+      redactions.length > 0 ||
+      drawings.length > 0 ||
+      Object.values(pageRotations).some((r) => r !== 0) ||
+      deskItems.length > 0
+    if (!hasUnsaved || window.confirm('現在の作業内容をリセットして入り口（モード選択画面）へ戻りますか？')) {
       ++loadGenRef.current
+      setIsHomeScreen(true)
+      setIsDeskOpen(false)
       setPdfBytes(null)
       setFileName(null)
       setDocInfo(null)
@@ -1483,7 +1772,10 @@ export default function App() {
       setRedactions([])
       setDrawings([])
       setHistory([])
+      setDeskItems([])
+      setDeskDocs(new Map())
       setLastAddedRect(null)
+      setLastOptimizeResult(null)
       setPageImages((prev) => {
         revokeUrlMap(prev)
         return new Map()
@@ -1508,19 +1800,26 @@ export default function App() {
       <input
         ref={fileInputRef}
         type="file"
+        multiple
         accept="application/pdf,.pdf"
         className="hidden"
         onChange={(e) => {
-          if (e.target.files && e.target.files[0]) {
-            loadPdf(e.target.files[0])
+          if (e.target.files && e.target.files.length > 0) {
+            const targetMode = pendingEntryModeRef.current || workspaceMode
+            pendingEntryModeRef.current = null
+            openFilesInMode(e.target.files, targetMode)
+            e.target.value = ''
           }
         }}
       />
 
       {/* ヘッダー */}
       <Header
+        isHomeScreen={isHomeScreen}
         fileName={fileName}
         fileSize={pdfBytes?.byteLength ?? null}
+        workspaceMode={workspaceMode}
+        onWorkspaceModeChange={handleWorkspaceModeChange}
         totalRedactions={redactions.length}
         totalDrawings={drawings.length}
         hasOtherEdits={
@@ -1530,7 +1829,10 @@ export default function App() {
         isDeskOpen={isDeskOpen}
         deskItemCount={deskItems.length}
         hubSignature={docInfo?.hubSignature}
-        onUploadClick={() => fileInputRef.current?.click()}
+        onUploadClick={() => {
+          pendingEntryModeRef.current = workspaceMode
+          fileInputRef.current?.click()
+        }}
         onSaveClick={handleSave}
         onSaveDraftClick={handleSaveDraft}
         onCompactClick={handleCompactPdf}
@@ -1547,10 +1849,466 @@ export default function App() {
         </div>
       )}
 
-      {pdfBytes && docInfo ? (
+      {isHomeScreen ? (
+        /* 🏠 入り口（ホーム画面）: 目的別の4つのモード選択カード */
+        <div className="flex-1 flex flex-col items-center justify-center p-4 sm:p-8 bg-slate-950 text-slate-100 overflow-y-auto relative">
+          <div className="max-w-4xl w-full flex flex-col items-center">
+            {/* タイトルバッジ */}
+            <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-blue-950/50 border border-blue-500/40 text-blue-300 text-xs font-semibold mb-3 shadow-sm">
+              <ShieldCheck className="w-4 h-4 text-blue-400" />
+              <span>GioV PDF Hub — 完全ローカル・オフライン完結</span>
+            </div>
+
+            <h2 className="text-2xl sm:text-3xl font-extrabold text-white text-center mb-2 tracking-tight">
+              作業モードを選択してスタート
+            </h2>
+            <p className="text-xs sm:text-sm text-slate-400 text-center mb-6 max-w-xl">
+              カードをクリックすると、その作業専用のシンプルな画面が立ち上がります（カードへ直接PDFをドロップして開くことも可能です）。
+            </p>
+
+            {/* 4つの入り口カード (2x2 グリッド) */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 w-full">
+              {/* ① 🧹 墨消しカード */}
+              <div
+                onClick={() => enterWorkspaceMode('redact')}
+                onDragOver={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    openFilesInMode(e.dataTransfer.files, 'redact')
+                  }
+                }}
+                className="group p-6 rounded-2xl border border-slate-800 hover:border-rose-500/80 bg-slate-900/60 hover:bg-slate-900/95 transition flex flex-col justify-between cursor-pointer shadow-xl relative overflow-hidden"
+              >
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="w-12 h-12 rounded-xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400 group-hover:scale-110 transition">
+                      <Eraser className="w-6 h-6" />
+                    </div>
+                    <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                      完全不可逆 Redaction
+                    </span>
+                  </div>
+                  <h3 className="text-lg font-extrabold text-white mb-1.5 group-hover:text-rose-300 transition">
+                    🧹 墨消し（黒塗り・白塗り）
+                  </h3>
+                  <p className="text-xs text-slate-400 leading-relaxed mb-4">
+                    テキスト自動吸着・自由矩形・キーワード一括検索で、個人情報や機密箇所をPDF内部データから物理的に完全消去します。
+                  </p>
+                </div>
+                <div className="flex items-center justify-between pt-3 border-t border-slate-800/80 text-xs font-bold text-rose-400 group-hover:text-rose-300">
+                  <span>墨消し画面を開く →</span>
+                  <Eraser className="w-4 h-4" />
+                </div>
+              </div>
+
+              {/* ② ✏️ 描画・計測カード */}
+              <div
+                onClick={() => enterWorkspaceMode('draw')}
+                onDragOver={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    openFilesInMode(e.dataTransfer.files, 'draw')
+                  }
+                }}
+                className="group p-6 rounded-2xl border border-slate-800 hover:border-blue-500/80 bg-slate-900/60 hover:bg-slate-900/95 transition flex flex-col justify-between cursor-pointer shadow-xl relative overflow-hidden"
+              >
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="w-12 h-12 rounded-xl bg-blue-500/15 border border-blue-500/30 flex items-center justify-center text-blue-400 group-hover:scale-110 transition">
+                      <PenTool className="w-6 h-6" />
+                    </div>
+                    <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-blue-500/15 text-blue-300 border border-blue-500/30">
+                      朱書き校正・透明物差し
+                    </span>
+                  </div>
+                  <h3 className="text-lg font-extrabold text-white mb-1.5 group-hover:text-blue-300 transition">
+                    ✏️ 描画・計測（文字・図形・寸法）
+                  </h3>
+                  <p className="text-xs text-slate-400 leading-relaxed mb-4">
+                    文字入力、矢印・円・多角形・チェックマーク、印鑑・画像の挿入、縮尺対応の透明物差し（距離・面積計測）で図面や書類を校正します。
+                  </p>
+                </div>
+                <div className="flex items-center justify-between pt-3 border-t border-slate-800/80 text-xs font-bold text-blue-400 group-hover:text-blue-300">
+                  <span>描画・計測画面を開く →</span>
+                  <PenTool className="w-4 h-4" />
+                </div>
+              </div>
+
+              {/* ③ 🗂️ 作業机・ページ整理カード */}
+              <div
+                onClick={() => enterWorkspaceMode('organize')}
+                onDragOver={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    openFilesInMode(e.dataTransfer.files, 'organize')
+                  }
+                }}
+                className="group p-6 rounded-2xl border border-slate-800 hover:border-emerald-500/80 bg-slate-900/60 hover:bg-slate-900/95 transition flex flex-col justify-between cursor-pointer shadow-xl relative overflow-hidden"
+              >
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="w-12 h-12 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 group-hover:scale-110 transition">
+                      <FolderKanban className="w-6 h-6" />
+                    </div>
+                    <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                      複数PDF結合・抽出・回転
+                    </span>
+                  </div>
+                  <h3 className="text-lg font-extrabold text-white mb-1.5 group-hover:text-emerald-300 transition">
+                    🗂️ 作業机・ページ整理（結合・並替）
+                  </h3>
+                  <p className="text-xs text-slate-400 leading-relaxed mb-4">
+                    作業机を開いた状態で開始し、複数PDFから必要なページだけを集めて順序入替・結合出力したり、ページ抽出・回転・しおり整理を行います。
+                  </p>
+                </div>
+                <div className="flex items-center justify-between pt-3 border-t border-slate-800/80 text-xs font-bold text-emerald-400 group-hover:text-emerald-300">
+                  <span>作業机・ページ整理画面を開く →</span>
+                  <Layers className="w-4 h-4" />
+                </div>
+              </div>
+
+              {/* ④ 📦 軽量化カード */}
+              <div
+                onClick={() => enterWorkspaceMode('optimize')}
+                onDragOver={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    openFilesInMode(e.dataTransfer.files, 'optimize')
+                  }
+                }}
+                className="group p-6 rounded-2xl border border-slate-800 hover:border-amber-500/80 bg-slate-900/60 hover:bg-slate-900/95 transition flex flex-col justify-between cursor-pointer shadow-xl relative overflow-hidden"
+              >
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="w-12 h-12 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 group-hover:scale-110 transition">
+                      <Minimize2 className="w-6 h-6" />
+                    </div>
+                    <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                      テキスト選択100%維持
+                    </span>
+                  </div>
+                  <h3 className="text-lg font-extrabold text-white mb-1.5 group-hover:text-amber-300 transition">
+                    📦 軽量化（コンパクト圧縮）
+                  </h3>
+                  <p className="text-xs text-slate-400 leading-relaxed mb-4">
+                    文字の選択・検索やベクター図面の鮮明さを100%保ったまま、埋め込み画像と不要データだけをピンポイント圧縮して容量を削減します。
+                  </p>
+                </div>
+                <div className="flex items-center justify-between pt-3 border-t border-slate-800/80 text-xs font-bold text-amber-400 group-hover:text-amber-300">
+                  <span>軽量化画面を開く →</span>
+                  <Minimize2 className="w-4 h-4" />
+                </div>
+              </div>
+            </div>
+
+            {/* 安心のセキュリティ・特徴フッター */}
+            <div className="mt-8 grid grid-cols-1 sm:grid-cols-3 gap-3 w-full text-xs text-slate-400">
+              <div className="bg-slate-900/40 border border-slate-800/80 p-3 rounded-xl flex items-start gap-2.5">
+                <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold text-slate-200">完全オフライン処理：</span>
+                  外部サーバーへの送信ゼロ。機密文書も端末内で安全に完結。
+                </div>
+              </div>
+
+              <div className="bg-slate-900/40 border border-slate-800/80 p-3 rounded-xl flex items-start gap-2.5">
+                <Eraser className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold text-slate-200">真のRedaction：</span>
+                  黒塗り・白塗り箇所は内部テキスト・画像ごと完全消去し復元不能。
+                </div>
+              </div>
+
+              <div className="bg-slate-900/40 border border-slate-800/80 p-3 rounded-xl flex items-start gap-2.5">
+                <FileCheck className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold text-slate-200">一時保存＆再編集：</span>
+                  途中経過を一時保存したPDFは、後から開いて何度でも再編集可能。
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : workspaceMode === 'optimize' ? (
+        /* 📦 軽量化モード専用画面（ファイル選択前も選択後もこの1画面でシンプルに完結） */
+        <div className="flex-1 flex flex-col items-center justify-center p-4 sm:p-8 bg-slate-950 overflow-y-auto">
+          <div className="max-w-xl w-full bg-slate-900 border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl space-y-6">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-800 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
+                  <Minimize2 className="w-6 h-6" />
+                </div>
+                <div>
+                  <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                    テキスト選択・ベクター図面 100%維持
+                  </span>
+                  <h2 className="text-lg sm:text-xl font-extrabold text-white mt-1">
+                    PDF軽量化・コンパクト圧縮
+                  </h2>
+                </div>
+              </div>
+            </div>
+
+            {/* ファイル未選択時はドロップゾーン、選択済みならファイル情報カード */}
+            {!pdfBytes || !docInfo ? (
+              <div
+                onClick={() => triggerFileOpenWithMode('optimize')}
+                className="p-8 border-2 border-dashed border-amber-500/40 hover:border-amber-400 rounded-2xl bg-slate-950/70 hover:bg-slate-950 transition flex flex-col items-center justify-center text-center cursor-pointer group"
+              >
+                <div className="w-14 h-14 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 mb-3 group-hover:scale-105 transition">
+                  <FileUp className="w-7 h-7" />
+                </div>
+                <div className="text-base font-bold text-white mb-1">
+                  軽量化したいPDFをここにドラッグ＆ドロップ
+                </div>
+                <p className="text-xs text-slate-400 mb-4">
+                  または下のボタンをクリックしてファイルを選択してください
+                </p>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    triggerFileOpenWithMode('optimize')
+                  }}
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 text-xs sm:text-sm font-extrabold shadow-lg shadow-amber-500/20 flex items-center gap-2 cursor-pointer"
+                >
+                  <FileUp className="w-4 h-4" />
+                  <span>PDFファイルを選択</span>
+                </button>
+              </div>
+            ) : (
+              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="text-xs text-slate-400">対象ファイル ({docInfo.numPages} ページ)</div>
+                  <div className="text-sm font-bold text-blue-300 truncate mt-0.5" title={fileName || ''}>
+                    {fileName}
+                  </div>
+                </div>
+                <div className="text-right shrink-0">
+                  <div className="text-xs text-slate-400">現在のサイズ</div>
+                  <div className="text-base font-mono font-extrabold text-white mt-0.5">
+                    {formatBytes(pdfBytes.byteLength)}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 圧縮レベルの選択 */}
+            <div className="space-y-2.5">
+              <div className="text-xs font-bold text-slate-300">圧縮レベルを選択してください:</div>
+
+              <label
+                onClick={() => setOptimizeLevel('standard')}
+                className={`block p-3.5 rounded-xl border cursor-pointer transition ${
+                  optimizeLevel === 'standard'
+                    ? 'bg-amber-500/10 border-amber-500/60 ring-1 ring-amber-400/30'
+                    : 'bg-slate-800/40 border-slate-700/70 hover:bg-slate-800/70'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-xs sm:text-sm font-bold text-white flex items-center gap-2">
+                    <input
+                      type="radio"
+                      checked={optimizeLevel === 'standard'}
+                      onChange={() => setOptimizeLevel('standard')}
+                      className="accent-amber-400"
+                    />
+                    標準（推奨：画質とサイズの最適バランス）
+                  </span>
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-semibold">
+                    おすすめ
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 mt-1.5 pl-6">
+                  文字・線画は100%無劣化。埋め込み写真・画像のみ長辺最大 1600px / JPEG品質 75% に最適化し、不要ゴミデータを完全除去します。
+                </p>
+              </label>
+
+              <label
+                onClick={() => setOptimizeLevel('high')}
+                className={`block p-3.5 rounded-xl border cursor-pointer transition ${
+                  optimizeLevel === 'high'
+                    ? 'bg-amber-500/10 border-amber-500/60 ring-1 ring-amber-400/30'
+                    : 'bg-slate-800/40 border-slate-700/70 hover:bg-slate-800/70'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-xs sm:text-sm font-bold text-white flex items-center gap-2">
+                    <input
+                      type="radio"
+                      checked={optimizeLevel === 'high'}
+                      onChange={() => setOptimizeLevel('high')}
+                      className="accent-amber-400"
+                    />
+                    高圧縮（メール添付・電子納品・容量制限対策）
+                  </span>
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 font-semibold">
+                    最小サイズ
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 mt-1.5 pl-6">
+                  文字・線画は100%無劣化。埋め込み写真・画像を長辺最大 1200px / JPEG品質 55% に高圧縮し、ファイルサイズを劇的に削減します。
+                </p>
+              </label>
+
+              <label
+                onClick={() => setOptimizeLevel('lossless')}
+                className={`block p-3.5 rounded-xl border cursor-pointer transition ${
+                  optimizeLevel === 'lossless'
+                    ? 'bg-amber-500/10 border-amber-500/60 ring-1 ring-amber-400/30'
+                    : 'bg-slate-800/40 border-slate-700/70 hover:bg-slate-800/70'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-xs sm:text-sm font-bold text-white flex items-center gap-2">
+                    <input
+                      type="radio"
+                      checked={optimizeLevel === 'lossless'}
+                      onChange={() => setOptimizeLevel('lossless')}
+                      className="accent-amber-400"
+                    />
+                    ロスレス（画質も完全無劣化・構造クリーンアップのみ）
+                  </span>
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold">
+                    完全無劣化
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 mt-1.5 pl-6">
+                  画像の画質も一切変更せず、PDF内部に残った不要データ・重複オブジェクトの掃除とストリーム圧縮のみを行います。
+                </p>
+              </label>
+            </div>
+
+            {/* 軽量化結果表示 */}
+            {lastOptimizeResult && (
+              <div className="p-4 rounded-xl bg-emerald-950/70 border border-emerald-500/50 text-emerald-200 space-y-1.5 animate-fade-in">
+                <div className="font-bold text-sm text-emerald-300 flex items-center justify-between">
+                  <span>
+                    ✨ 軽量化完了: {formatBytes(lastOptimizeResult.originalSize)} →{' '}
+                    {formatBytes(lastOptimizeResult.compactedSize)}
+                  </span>
+                  <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/30 text-emerald-100 font-mono text-xs font-extrabold">
+                    {lastOptimizeResult.compactedSize < lastOptimizeResult.originalSize
+                      ? `▲ ${Math.round(
+                          ((lastOptimizeResult.originalSize - lastOptimizeResult.compactedSize) /
+                            lastOptimizeResult.originalSize) *
+                            100
+                        )}% 削減`
+                      : '最適化済'}
+                  </span>
+                </div>
+                <div className="text-xs text-emerald-300/80">
+                  ・最適化された埋め込み画像: {lastOptimizeResult.optimizedImagesCount} 件 ／ テキスト選択・検索100%維持
+                </div>
+              </div>
+            )}
+
+            {/* アクションボタン（ファイル選択済みのときのみ有効化） */}
+            {pdfBytes && docInfo && (
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2 border-t border-slate-800">
+                <button
+                  onClick={() => triggerFileOpenWithMode('optimize')}
+                  disabled={isProcessing}
+                  className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer"
+                >
+                  <FileUp className="w-4 h-4 text-slate-300" />
+                  <span>別のPDFを選択</span>
+                </button>
+
+                <div className="flex flex-wrap items-center gap-2.5 w-full sm:w-auto justify-end">
+                  <button
+                    onClick={async () => {
+                      const res = await handleCompactPdf(optimizeLevel, 'apply')
+                      if (res) setLastOptimizeResult(res)
+                    }}
+                    disabled={isProcessing}
+                    className="flex-1 sm:flex-initial px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/40 text-xs font-bold transition cursor-pointer disabled:opacity-50"
+                    title="軽量化したデータを現在の作業ファイルに反映します"
+                  >
+                    ✨ 作業データに反映
+                  </button>
+                  <button
+                    onClick={async () => {
+                      const res = await handleCompactPdf(optimizeLevel, 'download')
+                      if (res) setLastOptimizeResult(res)
+                    }}
+                    disabled={isProcessing}
+                    className="flex-1 sm:flex-initial px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 text-xs sm:text-sm font-extrabold transition shadow-lg shadow-amber-500/25 cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>軽量化PDFを保存</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : workspaceMode === 'organize' ? (
+        /* 🗂️ 作業机・整理モード専用メイン画面（作業机そのものを主役として全画面表示） */
+        <div className="flex-1 flex overflow-hidden">
+          <DeskSidebar
+            isMainView={true}
+            width={rightSidebarWidth}
+            isOpen={true}
+            sourceItems={deskSourceItems}
+            items={deskItems}
+            docsMap={deskDocs}
+            currentPageIndex={currentPage}
+            currentDocName={fileName}
+            selectedPageCount={selectedPagesForExtract.size}
+            onClose={() => setIsDeskOpen(false)}
+            onResizeWidth={handleResizeRightSidebar}
+            onAddCurrentPage={() => handleAddToDesk(currentPage)}
+            onAddSelectedPages={() =>
+              handleAddSelectedToDesk(Array.from(selectedPagesForExtract).sort((a, b) => a - b))
+            }
+            onAddAllPages={handleAddAllPagesToDesk}
+            onAddPdfFiles={handleAddPdfFilesToDesk}
+            onMoveItem={handleMoveDeskItem}
+            onRotateItem={handleRotateDeskItem}
+            onRemoveItem={handleRemoveDeskItem}
+            onRotateTargetItems={handleRotateTargetItems}
+            onRemoveTargetItems={handleRemoveTargetItems}
+            onExtractItemsToWorkspace={handleExtractItemsToDesk}
+            onMoveSourceGroupToIndex={handleMoveSourceGroupToIndex}
+            onRotateSourceGroup={handleRotateSourceGroup}
+            onRemoveSourceGroup={handleRemoveSourceGroup}
+            onRotateSourceItems={handleRotateSourceItems}
+            onRemoveSourceItems={handleRemoveSourceItems}
+            onLoadSingleDocAsCurrent={handleLoadSingleDeskDoc}
+            onClearAll={handleClearAllDesk}
+            onExportMergedPdf={handleExportMergedPdf}
+            onPrintMergedPdf={handlePrintMergedPdf}
+            onLoadAsCurrentDoc={handleLoadDeskAsCurrentDoc}
+            onSelectDeskItemPreview={handleSelectDeskItemPreview}
+            isProcessing={isProcessing}
+          />
+        </div>
+      ) : pdfBytes && docInfo ? (
+        /* 📄 ファイル読み込み済み（墨消し / 描画・計測モード） */
         <>
-          {/* ツールバー */}
           <Toolbar
+            workspaceMode={workspaceMode}
             currentPage={currentPage}
             numPages={docInfo.numPages}
             zoom={zoom}
@@ -1570,6 +2328,11 @@ export default function App() {
             pageDrawingCount={currentPageDrawings.length}
             totalDrawingCount={drawings.length}
             canUndo={history.length > 0}
+            isDeskOpen={isDeskOpen}
+            onRotateCurrentPage={() => handleRotatePage(currentPage, 90)}
+            onAddCurrentPageToDesk={() => handleAddToDesk(currentPage)}
+            onAddAllPagesToDesk={handleAddAllPagesToDesk}
+            onToggleDesk={() => setIsDeskOpen((prev) => !prev)}
             onPageChange={setCurrentPage}
             onZoomChange={setZoom}
             onColorModeChange={setColorMode}
@@ -1596,7 +2359,6 @@ export default function App() {
             onFitToWindow={() => setFitViewTrigger(Date.now())}
           />
 
-          {/* メインワークスペース: サムネイル + メインビューア */}
           <div className="flex-1 flex overflow-hidden">
             {docInfo && (
               <ThumbnailSidebar
@@ -1658,6 +2420,7 @@ export default function App() {
             <DeskSidebar
               width={rightSidebarWidth}
               isOpen={isDeskOpen}
+              sourceItems={deskSourceItems}
               items={deskItems}
               docsMap={deskDocs}
               currentPageIndex={currentPage}
@@ -1674,6 +2437,13 @@ export default function App() {
               onMoveItem={handleMoveDeskItem}
               onRotateItem={handleRotateDeskItem}
               onRemoveItem={handleRemoveDeskItem}
+              onRotateTargetItems={handleRotateTargetItems}
+              onRemoveTargetItems={handleRemoveTargetItems}
+              onExtractItemsToWorkspace={handleExtractItemsToDesk}
+              onMoveGroup={handleMoveDeskGroup}
+              onRotateGroup={handleRotateDeskGroup}
+              onRemoveGroup={handleRemoveDeskGroup}
+              onLoadSingleDocAsCurrent={handleLoadSingleDeskDoc}
               onClearAll={handleClearAllDesk}
               onExportMergedPdf={handleExportMergedPdf}
               onPrintMergedPdf={handlePrintMergedPdf}
@@ -1684,85 +2454,114 @@ export default function App() {
           </div>
         </>
       ) : (
-        /* 初期状態: Cals-Viewerスタイルの初期画面 */
-        <div className="flex-1 flex flex-col items-center justify-center p-4 sm:p-8 bg-slate-950 text-slate-100 overflow-y-auto relative">
-          <div className="max-w-2xl w-full flex flex-col items-center">
-            {/* タイトルバッジ (Cals-Viewerスタイル) */}
-            <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-blue-950/50 border border-blue-500/40 text-blue-300 text-xs font-semibold mb-4 shadow-sm">
-              <ShieldCheck className="w-4 h-4 text-blue-400" />
-              <span>GioV PDF Hub (完全ローカル・スタンドアロン版)</span>
-            </div>
+        /* 🎯 モード選択後のファイル待機画面（墨消し / 描画・計測モードでここからファイル選択・ドラッグ＆ドロップが可能） */
+        <div className="flex-1 flex overflow-hidden">
+          <div className="flex-1 flex flex-col items-center justify-center p-4 sm:p-8 bg-slate-950 overflow-y-auto">
+            <div className="max-w-xl w-full flex flex-col items-center">
+              <div
+                onClick={() => triggerFileOpenWithMode(workspaceMode)}
+                className={`w-full p-8 sm:p-12 border-2 border-dashed rounded-2xl transition flex flex-col items-center justify-center text-center bg-slate-900/60 hover:bg-slate-900/90 cursor-pointer group shadow-2xl ${
+                  workspaceMode === 'redact'
+                    ? 'border-rose-500/40 hover:border-rose-500'
+                    : 'border-blue-500/40 hover:border-blue-500'
+                }`}
+              >
+                <div
+                  className={`w-16 h-16 rounded-2xl flex items-center justify-center mb-5 group-hover:scale-105 transition ${
+                    workspaceMode === 'redact'
+                      ? 'bg-rose-500/15 border border-rose-500/30 text-rose-400'
+                      : 'bg-blue-500/15 border border-blue-500/30 text-blue-400'
+                  }`}
+                >
+                  {workspaceMode === 'redact' ? (
+                    <Eraser className="w-8 h-8" />
+                  ) : (
+                    <PenTool className="w-8 h-8" />
+                  )}
+                </div>
 
-            <h2 className="text-2xl sm:text-3xl font-extrabold text-white text-center mb-2 tracking-tight">
-              PDF書類・図面を開いて作業を開始
-            </h2>
-            <p className="text-sm text-slate-400 text-center mb-8 max-w-lg">
-              不可逆墨消し、朱書き校正、高精度寸法計測、画像挿入、そして複数PDFを束ねる作業机まで、すべて外部サーバー通信なし・端末内完結で処理します。
-            </p>
+                <span
+                  className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full mb-2 ${
+                    workspaceMode === 'redact'
+                      ? 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
+                      : 'bg-blue-500/15 text-blue-300 border border-blue-500/30'
+                  }`}
+                >
+                  {workspaceMode === 'redact'
+                    ? '🧹 墨消し（不可逆Redaction）モード'
+                    : '✏️ 描画・計測（朱書き・透明物差し）モード'}
+                </span>
 
-            {/* ドロップゾーン */}
-            <div
-              onClick={() => fileInputRef.current?.click()}
-              className="w-full p-8 sm:p-12 border-2 border-dashed rounded-2xl transition flex flex-col items-center justify-center text-center backdrop-blur-sm border-slate-700 bg-slate-900/60 hover:border-rose-500/80 hover:bg-slate-900/80 cursor-pointer group shadow-2xl relative overflow-hidden ring-1 ring-white/5"
-            >
-              <div className="w-16 h-16 rounded-2xl bg-rose-600/10 border border-rose-500/20 flex items-center justify-center text-rose-400 mb-5 shadow-inner group-hover:scale-105 transition transform">
-                <Eraser className="w-8 h-8 text-rose-400 animate-pulse" />
-              </div>
+                <h3 className="text-lg sm:text-xl font-extrabold text-white mb-2">
+                  {workspaceMode === 'redact'
+                    ? '墨消しするPDFをここにドラッグ＆ドロップ'
+                    : '描画・計測するPDFをここにドラッグ＆ドロップ'}
+                </h3>
 
-              <h3 className="text-lg font-bold text-slate-100 mb-1">
-                PDFファイルをここにドラッグ＆ドロップ
-              </h3>
-              <p className="text-xs text-slate-400 mb-6">
-                土木・建築図面、契約書、報告書、帳票など、あらゆるPDFドキュメントに対応
-              </p>
+                <p className="text-xs text-slate-400 mb-6 max-w-md leading-relaxed">
+                  {workspaceMode === 'redact'
+                    ? '黒塗り・白塗り、テキスト自動吸着、自由矩形、キーワード一括検索で機密箇所を完全消去します。'
+                    : '文字入力、矢印・円・多角形・チェックマーク、印鑑画像挿入、縮尺対応の透明物差しで図面や書類を校正します。'}
+                </p>
 
-              {/* ボタン */}
-              <div className="flex flex-wrap items-center justify-center gap-3 w-full max-w-md">
                 <button
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation()
-                    fileInputRef.current?.click()
+                    triggerFileOpenWithMode(workspaceMode)
                   }}
-                  className="flex-1 min-w-[200px] flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 text-white text-sm font-semibold shadow-lg shadow-rose-600/25 transition active:scale-95 cursor-pointer ring-1 ring-white/20"
+                  className={`px-6 py-3 rounded-xl text-white text-sm font-bold shadow-lg transition active:scale-95 cursor-pointer flex items-center gap-2 ${
+                    workspaceMode === 'redact'
+                      ? 'bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 shadow-rose-600/25'
+                      : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 shadow-blue-600/25'
+                  }`}
                 >
-                  <FileUp className="w-4 h-4 text-white" />
+                  <FileUp className="w-4 h-4" />
                   <span>PDFファイルを選択して開く</span>
                 </button>
               </div>
             </div>
-
-            {/* 特徴説明フッター (Cals-Viewerと同一の3カラムカード) */}
-            <div className="mt-12 grid grid-cols-1 sm:grid-cols-3 gap-4 w-full text-xs text-slate-400">
-              <div className="bg-slate-900/40 border border-slate-800 p-3.5 rounded-xl flex items-start gap-2.5">
-                <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
-                <div>
-                  <div className="font-semibold text-slate-200 mb-0.5">完全オフライン＆高セキュリティ</div>
-                  <div>データは端末内（ブラウザメモリ）でのみ解析・処理。外部サーバーへの送信は一切行いません。</div>
-                </div>
-              </div>
-
-              <div className="bg-slate-900/40 border border-slate-800 p-3.5 rounded-xl flex items-start gap-2.5">
-                <Eraser className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
-                <div>
-                  <div className="font-semibold text-slate-200 mb-0.5">完全不可逆・真のRedaction</div>
-                  <div>指定領域のテキスト・画像を内部から不可逆マスク。単なる目隠しや注釈マスキングと異なり、テキスト選択やコピペによる復元は一切不可能です。</div>
-                </div>
-              </div>
-
-              <div className="bg-slate-900/40 border border-slate-800 p-3.5 rounded-xl flex items-start gap-2.5">
-                <FileCheck className="w-5 h-5 text-blue-400 shrink-0 mt-0.5" />
-                <div>
-                  <div className="font-semibold text-slate-200 mb-0.5">OCR適性・他テキスト完全維持</div>
-                  <div>消去箇所以外の文字構造やフォント情報はそのまま維持。他システムでのOCRやテキスト選択に支障ありません。</div>
-                </div>
-              </div>
-            </div>
           </div>
+
+          <DeskSidebar
+            width={rightSidebarWidth}
+            isOpen={isDeskOpen}
+            sourceItems={deskSourceItems}
+            items={deskItems}
+            docsMap={deskDocs}
+            currentPageIndex={currentPage}
+            currentDocName={fileName}
+            selectedPageCount={selectedPagesForExtract.size}
+            onClose={() => setIsDeskOpen(false)}
+            onResizeWidth={handleResizeRightSidebar}
+            onAddCurrentPage={() => handleAddToDesk(currentPage)}
+            onAddSelectedPages={() =>
+              handleAddSelectedToDesk(Array.from(selectedPagesForExtract).sort((a, b) => a - b))
+            }
+            onAddAllPages={handleAddAllPagesToDesk}
+            onAddPdfFiles={handleAddPdfFilesToDesk}
+            onMoveItem={handleMoveDeskItem}
+            onRotateItem={handleRotateDeskItem}
+            onRemoveItem={handleRemoveDeskItem}
+            onRotateTargetItems={handleRotateTargetItems}
+            onRemoveTargetItems={handleRemoveTargetItems}
+            onExtractItemsToWorkspace={handleExtractItemsToDesk}
+            onMoveGroup={handleMoveDeskGroup}
+            onMoveGroupToIndex={handleMoveDeskGroupToIndex}
+            onRotateGroup={handleRotateDeskGroup}
+            onRemoveGroup={handleRemoveDeskGroup}
+            onLoadSingleDocAsCurrent={handleLoadSingleDeskDoc}
+            onClearAll={handleClearAllDesk}
+            onExportMergedPdf={handleExportMergedPdf}
+            onPrintMergedPdf={handlePrintMergedPdf}
+            onLoadAsCurrentDoc={handleLoadDeskAsCurrentDoc}
+            onSelectDeskItemPreview={handleSelectDeskItemPreview}
+            isProcessing={isProcessing}
+          />
         </div>
       )}
 
-      {/* 処理中ローディングオーバーレイ (Cals-Viewerスタイル) */}
+      {/* 処理中ローディングオーバーレイ */}
       {(isLoadingPdf || isProcessing) && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-4 animate-in fade-in duration-150">
           <div className="bg-slate-900 border border-slate-700/80 rounded-2xl p-8 max-w-md w-full shadow-2xl flex flex-col items-center text-center">
@@ -1773,14 +2572,14 @@ export default function App() {
             </div>
 
             <h3 className="text-lg font-bold text-white mb-2">
-              {isLoadingPdf ? 'PDFドキュメントを読み込み中' : '不可逆墨消しを実行中'}
+              {isLoadingPdf ? 'PDFドキュメントを読み込み中' : 'PDF処理を実行中'}
             </h3>
             
             {/* リアルタイム進捗メッセージ */}
             <p className="text-sm font-medium text-rose-400 mb-4 min-h-[1.5rem]">
               {isLoadingPdf
                 ? '端末内部のWebAssemblyエンジンで安全に展開中...'
-                : '指定箇所のテキストを不可逆マスクし、他テキストのOCR構造を保持中...'}
+                : 'テキスト構造と図面品質を保持しながら高速処理中...'}
             </p>
 
             {/* パルスプログレスバー */}

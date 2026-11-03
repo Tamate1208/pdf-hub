@@ -403,9 +403,7 @@ export const ThumbnailSidebar: React.FC<ThumbnailSidebarProps> = ({
                         <button
                           onClick={(e) => {
                             e.stopPropagation()
-                            if (window.confirm(`${p.index + 1} ページを削除してもよろしいですか？`)) {
-                              onDeletePage(p.index)
-                            }
+                            onDeletePage(p.index)
                           }}
                           className="p-1.5 rounded-lg bg-rose-600/90 hover:bg-rose-500 text-white shadow-md transition transform hover:scale-110 pointer-events-auto cursor-pointer"
                           title="このページを削除"

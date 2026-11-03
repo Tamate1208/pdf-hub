@@ -24,10 +24,14 @@ import {
   Hand,
   Image as ImageIcon,
   Maximize2,
+  RotateCw,
+  Layers,
+  CopyPlus,
 } from 'lucide-react'
-import { AppMode, DrawingTool, FillMode, ArrowHead, RulerMeasureMode } from '../types/drawing'
+import { AppMode, WorkspaceMode, DrawingTool, FillMode, ArrowHead, RulerMeasureMode } from '../types/drawing'
 
 interface ToolbarProps {
+  workspaceMode: WorkspaceMode;
   currentPage: number;
   numPages: number;
   zoom: number;
@@ -54,6 +58,12 @@ interface ToolbarProps {
   onRulerScaleChange: (scale: number) => void;
   rulerMeasureMode: RulerMeasureMode;
   onRulerMeasureModeChange: (mode: RulerMeasureMode) => void;
+  // ページ整理・作業机クイック操作
+  isDeskOpen?: boolean;
+  onRotateCurrentPage?: () => void;
+  onAddCurrentPageToDesk?: () => void;
+  onAddAllPagesToDesk?: () => void;
+  onToggleDesk?: () => void;
   // ハンドラ
   onPageChange: (newPage: number) => void;
   onZoomChange: (newZoom: number) => void;
@@ -88,6 +98,7 @@ const COLOR_PALETTE = [
 ]
 
 export const Toolbar: React.FC<ToolbarProps> = ({
+  workspaceMode,
   currentPage,
   numPages,
   zoom,
@@ -111,6 +122,11 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onRulerScaleChange,
   rulerMeasureMode,
   onRulerMeasureModeChange,
+  isDeskOpen,
+  onRotateCurrentPage,
+  onAddCurrentPageToDesk,
+  onAddAllPagesToDesk,
+  onToggleDesk,
   onPageChange,
   onZoomChange,
   onResetView,
@@ -158,7 +174,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
 
   return (
     <div className="border-b border-slate-800 bg-slate-900/90 backdrop-blur px-6 py-2 flex flex-col gap-2 text-xs select-none">
-      {/* 上段バー: ナビゲーション ＋ メインモード切替 ＋ 共通Undo/クリア */}
+      {/* 上段バー: ナビゲーション ＋ モード別クイック操作・ガイド ＋ 共通Undo/クリア */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         {/* 左側: ページ送り ＆ ズーム */}
         <div className="flex items-center gap-3">
@@ -239,31 +255,60 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           </div>
         </div>
 
-        {/* 中央: メインモード切替タブ [🧹 墨消し] ⇄ [✏️ 描画・校正] */}
-        <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800 shadow-inner">
-          <button
-            onClick={() => onAppModeChange('eraser')}
-            className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
-              appMode === 'eraser'
-                ? 'bg-gradient-to-r from-rose-600 to-pink-600 text-white shadow-md shadow-rose-600/30'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Eraser className="w-4 h-4" />
-            <span>🧹 墨消し（不可逆マスク）</span>
-          </button>
-          <button
-            onClick={() => onAppModeChange('draw')}
-            className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
-              appMode === 'draw'
-                ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md shadow-blue-600/30'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <PenTool className="w-4 h-4" />
-            <span>✏️ 描画・校正（赤書・文字・囲み）</span>
-          </button>
-        </div>
+        {/* 中央: モードに応じたクイックツール / ステータス案内 */}
+        {workspaceMode === 'organize' ? (
+          <div className="flex flex-wrap items-center gap-2">
+            {onRotateCurrentPage && (
+              <button
+                onClick={onRotateCurrentPage}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer active:scale-95"
+                title="現在表示しているページを右に90度回転します"
+              >
+                <RotateCw className="w-3.5 h-3.5 text-amber-400" />
+                <span>現ページを90°回転</span>
+              </button>
+            )}
+            {onAddCurrentPageToDesk && (
+              <button
+                onClick={onAddCurrentPageToDesk}
+                className="px-3 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer active:scale-95"
+                title="現在表示しているページを右側の作業机へ追加します"
+              >
+                <Layers className="w-3.5 h-3.5 text-emerald-400" />
+                <span>現ページを作業机へ追加</span>
+              </button>
+            )}
+            {onAddAllPagesToDesk && (
+              <button
+                onClick={onAddAllPagesToDesk}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer active:scale-95"
+                title="このPDFの全ページをまとめて作業机へ追加します"
+              >
+                <CopyPlus className="w-3.5 h-3.5 text-blue-400" />
+                <span>全ページを作業机へ追加</span>
+              </button>
+            )}
+            {onToggleDesk && !isDeskOpen && (
+              <button
+                onClick={onToggleDesk}
+                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-sm"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>作業机を開く</span>
+              </button>
+            )}
+          </div>
+        ) : workspaceMode === 'redact' ? (
+          <div className="hidden xl:flex items-center gap-2 text-rose-300/90 bg-rose-950/30 border border-rose-500/20 px-3 py-1 rounded-lg">
+            <Eraser className="w-3.5 h-3.5 text-rose-400" />
+            <span>消したい文字や領域をマウスでドラッグして囲んでください（確定保存時にデータ内部から物理消去されます）</span>
+          </div>
+        ) : (
+          <div className="hidden xl:flex items-center gap-2 text-blue-300/90 bg-blue-950/30 border border-blue-500/20 px-3 py-1 rounded-lg">
+            <PenTool className="w-3.5 h-3.5 text-blue-400" />
+            <span>下のツールから文字入力・図形・画像・透明物差しを選択して配置・計測できます</span>
+          </div>
+        )}
 
         {/* 右側: Undo（元に戻す） ＆ クリア */}
         <div className="flex items-center gap-2">
@@ -281,7 +326,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             <span>元に戻す</span>
           </button>
 
-          {pageRedactionCount > 0 && appMode === 'eraser' && (
+          {pageRedactionCount > 0 && workspaceMode === 'redact' && (
             <button
               onClick={onClearPageRedactions}
               className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs transition flex items-center gap-1.5 cursor-pointer"
@@ -292,7 +337,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             </button>
           )}
 
-          {totalRedactionCount > 0 && appMode === 'eraser' && (
+          {totalRedactionCount > 0 && workspaceMode === 'redact' && (
             <button
               onClick={onClearAllRedactions}
               className="px-2.5 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/80 text-rose-300 border border-rose-800/80 text-xs font-medium transition flex items-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
@@ -305,8 +350,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         </div>
       </div>
 
-      {/* 下段サブバー: モード別の操作ツール */}
-      {appMode === 'eraser' ? (
+      {/* 下段サブバー: 墨消しモードまたは描画モードのときのみ表示（ページ整理モードでは非表示でスッキリ） */}
+      {workspaceMode === 'organize' ? null : workspaceMode === 'redact' ? (
         /* 墨消しモード用サブバー */
         <div className="flex flex-wrap items-center gap-4 pt-1 border-t border-slate-800/60">
           {/* 消しゴムカラー（黒塗り / 白塗り） */}

@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
-import { Eraser, Download, FileUp, ShieldCheck, RefreshCw, Layers, Scale, X, Printer, CheckCircle2, Save, Minimize2, Sparkles } from 'lucide-react'
+import { Eraser, Download, FileUp, ShieldCheck, Layers, Scale, X, Printer, CheckCircle2, Save, Minimize2, Sparkles, PenTool, FolderKanban, Home } from 'lucide-react'
 import { HubSignatureInfo, CompactLevel } from '../utils/mupdfService'
+import { WorkspaceMode } from '../types/drawing'
 
 function formatBytes(bytes?: number | null): string {
   if (!bytes || bytes <= 0) return ''
@@ -10,8 +11,11 @@ function formatBytes(bytes?: number | null): string {
 }
 
 interface HeaderProps {
+  isHomeScreen?: boolean;
   fileName: string | null;
   fileSize?: number | null;
+  workspaceMode: WorkspaceMode;
+  onWorkspaceModeChange: (mode: WorkspaceMode) => void;
   totalRedactions: number;
   totalDrawings?: number;
   hasOtherEdits?: boolean;
@@ -32,8 +36,11 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({
+  isHomeScreen = false,
   fileName,
   fileSize,
+  workspaceMode,
+  onWorkspaceModeChange,
   totalRedactions,
   totalDrawings = 0,
   hasOtherEdits = false,
@@ -69,100 +76,180 @@ export const Header: React.FC<HeaderProps> = ({
     ? '確定保存 (完全墨消し)'
     : hasOtherEdits
     ? '確定保存 (回転・編集済)'
-    : '確定保存 (完全墨消し)'
+    : '確定保存'
   return (
-    <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur-md px-6 py-3.5 flex items-center justify-between sticky top-0 z-30 shadow-md">
-      {/* ロゴとアプリ名 */}
-      <div className="flex items-center gap-3.5">
-        <div className="p-2.5 bg-gradient-to-br from-blue-600 via-indigo-600 to-rose-500 rounded-xl text-white shadow-lg shadow-blue-500/25 ring-1 ring-white/20">
-          <Layers className="w-6 h-6 animate-pulse" />
+    <header className="border-b border-slate-800 bg-slate-900/95 backdrop-blur-md px-4 lg:px-6 py-2.5 flex flex-wrap items-center justify-between gap-3 sticky top-0 z-30 shadow-md">
+      {/* 左側: ロゴ・アプリ名・ファイル情報 */}
+      <div className="flex items-center gap-3 min-w-0">
+        <div
+          onClick={!isHomeScreen ? onResetClick : undefined}
+          title={!isHomeScreen ? '入り口（モード選択画面）へ戻る' : undefined}
+          className={`p-2 bg-gradient-to-br from-blue-600 via-indigo-600 to-rose-500 rounded-xl text-white shadow-lg shadow-blue-500/25 ring-1 ring-white/20 shrink-0 ${
+            !isHomeScreen ? 'cursor-pointer hover:scale-105 transition' : ''
+          }`}
+        >
+          <Layers className="w-5 h-5" />
         </div>
-        <div>
-          <div className="flex items-center gap-2.5">
-            <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h1 className="text-base lg:text-lg font-bold tracking-tight text-white truncate">
               GioV PDF Hub
             </h1>
-            <span className="text-[11px] font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 flex items-center gap-1 shadow-sm">
-              <ShieldCheck className="w-3.5 h-3.5" />
-              完全不可逆・真のRedaction
-            </span>
-            <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-300 border border-blue-500/30">
-              校正・計測・編纂デスク統合
-            </span>
+            {!fileName && (
+              <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 hidden sm:inline-flex items-center gap-1">
+                <ShieldCheck className="w-3 h-3" />
+                完全ローカル完結
+              </span>
+            )}
           </div>
-          <p className="text-xs text-slate-400 mt-0.5 flex items-center gap-2">
+          <div className="text-xs text-slate-400 flex items-center gap-1.5 truncate">
             {fileName ? (
               <>
-                <span className="text-blue-300 font-medium truncate inline-block max-w-[320px]">
+                <span className="text-blue-300 font-medium truncate max-w-[180px] xl:max-w-[260px]" title={fileName}>
                   {fileName}
                 </span>
                 {fileSize && fileSize > 0 && (
-                  <span className="px-1.5 py-0.2 rounded bg-slate-800 border border-slate-700 text-[10px] text-slate-300 font-mono">
+                  <span className="px-1.5 py-0.2 rounded bg-slate-800 border border-slate-700 text-[10px] text-slate-300 font-mono shrink-0">
                     {formatBytes(fileSize)}
                   </span>
                 )}
                 {hubSignature && (
                   <span
                     onClick={() => setIsLicenseOpen(true)}
-                    className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded bg-emerald-950/80 border border-emerald-500/40 text-[10px] text-emerald-300 font-mono cursor-pointer hover:bg-emerald-900/80 transition"
+                    className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded bg-emerald-950/80 border border-emerald-500/40 text-[10px] text-emerald-300 font-mono cursor-pointer hover:bg-emerald-900/80 transition shrink-0"
                     title={`GioV PDF Hub 出力検証済 (${new Date(hubSignature.timestamp).toLocaleString('ja-JP')} / ${hubSignature.operation})`}
                   >
                     <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                    <span>Hub Verified</span>
+                    <span className="hidden md:inline">Verified</span>
                   </span>
                 )}
               </>
             ) : (
-              '墨消し・校正描画・寸法計測・資料編纂を完全ローカル完結で統合した高機能PDFワークスペース'
+              <span className="truncate">目的別の4つの入り口から、迷わずシンプルにPDFを処理</span>
             )}
-          </p>
+          </div>
         </div>
       </div>
 
-      {/* 右側アクションボタン */}
-      <div className="flex items-center gap-2.5">
-        {fileName && (
-          <>
-            <div className="text-right mr-1.5 hidden xl:block">
-              <span className="text-xs text-slate-400">
-                {totalRedactions > 0 && totalDrawings > 0
-                  ? '消しゴム ＋ 描画'
-                  : totalDrawings > 0
-                  ? '設定中の描画'
-                  : '設定中の消しゴム'}
+      {/* 中央: モード画面が立ち上がっているとき表示する4モード切替スイッチャー */}
+      {!isHomeScreen && (
+        <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800 shadow-inner gap-1">
+          <button
+            onClick={() => onWorkspaceModeChange('redact')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+              workspaceMode === 'redact'
+                ? 'bg-gradient-to-r from-rose-600 to-pink-600 text-white shadow-md shadow-rose-600/30'
+                : 'text-slate-400 hover:text-white hover:bg-slate-900'
+            }`}
+            title="機密抹消・黒塗り/白塗りモード"
+          >
+            <Eraser className="w-3.5 h-3.5" />
+            <span>墨消し</span>
+            {totalRedactions > 0 && (
+              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
+                workspaceMode === 'redact' ? 'bg-white text-rose-600' : 'bg-rose-500/20 text-rose-300'
+              }`}>
+                {totalRedactions}
               </span>
-              <div className="text-sm font-bold text-rose-400">
-                {totalCount} <span className="text-xs font-normal text-slate-400">箇所</span>
-              </div>
-            </div>
+            )}
+          </button>
 
-            <button
-              onClick={onResetClick}
-              disabled={isProcessing}
-              className="px-2.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition flex items-center gap-1.5 border border-slate-700 active:scale-95 disabled:opacity-50 cursor-pointer"
-              title="最初からやり直す"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span className="hidden lg:inline">リセット</span>
-            </button>
-          </>
+          <button
+            onClick={() => onWorkspaceModeChange('draw')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+              workspaceMode === 'draw'
+                ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md shadow-blue-600/30'
+                : 'text-slate-400 hover:text-white hover:bg-slate-900'
+            }`}
+            title="文字入力・図形・スタンプ・透明物差しによる描画・計測モード"
+          >
+            <PenTool className="w-3.5 h-3.5" />
+            <span>描画・計測</span>
+            {totalDrawings > 0 && (
+              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
+                workspaceMode === 'draw' ? 'bg-white text-blue-600' : 'bg-blue-500/20 text-blue-300'
+              }`}>
+                {totalDrawings}
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => onWorkspaceModeChange('organize')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+              workspaceMode === 'organize'
+                ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-md shadow-emerald-600/30'
+                : 'text-slate-400 hover:text-white hover:bg-slate-900'
+            }`}
+            title="複数PDFの結合・ページ抽出・回転・作業机によるページ整理モード"
+          >
+            <FolderKanban className="w-3.5 h-3.5" />
+            <span>作業机・整理</span>
+            {deskItemCount > 0 && (
+              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
+                workspaceMode === 'organize' ? 'bg-white text-emerald-700' : 'bg-emerald-600 text-white'
+              }`}>
+                {deskItemCount}
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => onWorkspaceModeChange('optimize')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+              workspaceMode === 'optimize'
+                ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 shadow-md shadow-amber-500/30'
+                : 'text-slate-400 hover:text-amber-300 hover:bg-slate-900'
+            }`}
+            title="テキスト選択を維持したままファイルサイズを軽量化するモード"
+          >
+            <Minimize2 className="w-3.5 h-3.5" />
+            <span>軽量化</span>
+          </button>
+        </div>
+      )}
+
+      {/* 右側アクションボタン */}
+      <div className="flex items-center gap-2">
+        {!isHomeScreen && (
+          <button
+            onClick={onResetClick}
+            disabled={isProcessing}
+            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition flex items-center gap-1.5 border border-slate-700 active:scale-95 disabled:opacity-50 cursor-pointer"
+            title="現在の画面を閉じて、最初の入り口（4モード選択画面）へ戻る"
+          >
+            <Home className="w-3.5 h-3.5 text-slate-400" />
+            <span>入り口へ</span>
+          </button>
         )}
 
-        {onToggleDesk && (
+        {!isHomeScreen && (
+          <button
+            onClick={onUploadClick}
+            disabled={isProcessing}
+            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition flex items-center gap-1.5 border border-slate-700 active:scale-95 shadow-sm cursor-pointer"
+            title={workspaceMode === 'organize' ? 'PDFファイルを選択して作業机に追加' : 'PDFファイルを選択して開く'}
+          >
+            <FileUp className="w-3.5 h-3.5 text-slate-300" />
+            <span>{workspaceMode === 'organize' ? 'PDFを机に追加' : fileName ? '別のPDF' : 'PDFを開く'}</span>
+          </button>
+        )}
+
+        {!isHomeScreen && (workspaceMode === 'redact' || workspaceMode === 'draw') && onToggleDesk && (
           <button
             onClick={onToggleDesk}
-            className={`px-3 py-2 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 border active:scale-95 cursor-pointer shadow-sm ${
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 border active:scale-95 cursor-pointer shadow-sm ${
               isDeskOpen
-                ? 'bg-blue-600 hover:bg-blue-500 text-white border-blue-400 ring-2 ring-blue-400/30'
+                ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400 ring-2 ring-emerald-400/30'
                 : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
             }`}
-            title="作業机（複数PDFの束ね・編纂デスク）を開閉"
+            title="作業机（複数PDFの束ね・編纂ドロワー）を右側からいつでも開閉できます"
           >
-            <Layers className={`w-4 h-4 ${isDeskOpen ? 'text-white' : 'text-blue-400'}`} />
+            <Layers className={`w-3.5 h-3.5 ${isDeskOpen ? 'text-white' : 'text-emerald-400'}`} />
             <span>作業机</span>
             {deskItemCount > 0 && (
               <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
-                isDeskOpen ? 'bg-white text-blue-700' : 'bg-blue-600 text-white'
+                isDeskOpen ? 'bg-white text-emerald-700' : 'bg-emerald-600 text-white'
               }`}>
                 {deskItemCount}
               </span>
@@ -170,77 +257,53 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
         )}
 
-        <button
-          onClick={onUploadClick}
-          disabled={isProcessing}
-          className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition flex items-center gap-1.5 border border-slate-700 active:scale-95 shadow-sm cursor-pointer"
-        >
-          <FileUp className="w-4 h-4 text-slate-300" />
-          <span>{fileName ? '別のPDFを開く' : 'PDFファイルを開く'}</span>
-        </button>
-
-        {fileName && onCompactClick && (
-          <button
-            onClick={() => {
-              setLastCompactResult(null)
-              setIsCompactOpen(true)
-            }}
-            disabled={isProcessing}
-            className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-semibold transition flex items-center gap-1.5 border border-amber-500/40 active:scale-95 shadow-sm cursor-pointer disabled:opacity-50"
-            title="テキスト選択・ベクター図面を100%維持したまま、PDF内部の画像データと不要ストリームを圧縮してファイルサイズを軽量化します"
-          >
-            <Minimize2 className="w-4 h-4 text-amber-400" />
-            <span>軽量化</span>
-          </button>
-        )}
-
-        {fileName && onPrintClick && (
+        {fileName && workspaceMode !== 'optimize' && workspaceMode !== 'organize' && onPrintClick && (
           <button
             onClick={onPrintClick}
             disabled={isProcessing}
-            className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition flex items-center gap-1.5 border border-slate-700 active:scale-95 shadow-sm cursor-pointer disabled:opacity-50"
+            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition flex items-center gap-1.5 border border-slate-700 active:scale-95 shadow-sm cursor-pointer disabled:opacity-50"
             title="現在の編集内容（墨消し・校正・回転）を反映して直接プリンターで印刷します"
           >
-            <Printer className="w-4 h-4 text-blue-400" />
-            <span>印刷</span>
+            <Printer className="w-3.5 h-3.5 text-blue-400" />
+            <span className="hidden lg:inline">印刷</span>
           </button>
         )}
 
-        {fileName && onSaveDraftClick && (
+        {fileName && workspaceMode !== 'optimize' && workspaceMode !== 'organize' && onSaveDraftClick && (
           <button
             onClick={onSaveDraftClick}
             disabled={isProcessing}
-            className={`px-3.5 py-2 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 border active:scale-95 shadow-sm cursor-pointer disabled:opacity-50 ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 border active:scale-95 shadow-sm cursor-pointer disabled:opacity-50 ${
               hasAnyEdits
                 ? 'bg-indigo-950/90 hover:bg-indigo-900 text-indigo-200 border-indigo-500/60 ring-1 ring-indigo-400/30'
                 : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
             }`}
-            title="物理切除を行わずに一時保存します。一般のPDFビューアでも編集内容が表示され、後からこのアプリで開くとすべての墨消し枠・注記・図形を再編集できます"
+            title="物理切除を行わずに一時保存します。後からこのアプリで開くとすべての墨消し枠・注記・図形を再編集できます"
           >
-            <Save className="w-4 h-4 text-indigo-400" />
-            <span>一時保存 (再編集可)</span>
+            <Save className="w-3.5 h-3.5 text-indigo-400" />
+            <span>一時保存</span>
           </button>
         )}
 
-        {fileName && (
+        {fileName && workspaceMode !== 'optimize' && workspaceMode !== 'organize' && (
           <button
             onClick={onSaveClick}
             disabled={isProcessing}
-            className={`px-3.5 py-2 rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow-lg active:scale-95 ${
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow-lg active:scale-95 ${
               hasAnyEdits
                 ? 'bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 text-white shadow-rose-600/30 ring-1 ring-rose-400/50 cursor-pointer'
                 : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer'
             }`}
-            title={!hasAnyEdits ? '消しゴム枠・描画アイテム・ページ回転などを設定してから保存してください' : '指定箇所のテキスト・画像を物理切除し、編集内容を確定保存します（不可逆）'}
+            title={!hasAnyEdits ? '現在のPDFを保存します' : '指定箇所のテキスト・画像を物理切除し、編集内容を確定保存します（不可逆）'}
           >
-            <Download className={`w-4 h-4 ${isProcessing ? 'animate-bounce' : ''}`} />
+            <Download className={`w-3.5 h-3.5 ${isProcessing ? 'animate-bounce' : ''}`} />
             <span>{saveBtnLabel}</span>
           </button>
         )}
 
         <button
           onClick={() => setIsLicenseOpen(true)}
-          className="p-2 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700/80 transition cursor-pointer"
+          className="p-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700/80 transition cursor-pointer"
           title="オープンソースライセンス・著作権情報 (AGPL-3.0)"
         >
           <Scale className="w-4 h-4" />

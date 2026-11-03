@@ -300,6 +300,14 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     setPanOffset({ x: 0, y: 0 })
   }, [pageInfo?.index, resetViewTrigger])
 
+  // モード切り替え時に手のひらパン状態を確実にリセット
+  useEffect(() => {
+    setIsSpacePressed(false)
+    setIsPanning(false)
+    isPanningRef.current = false
+    panStartRef.current = null
+  }, [appMode])
+
   // ページ切り替え時に未確定の入力ポップアップ・描画途中の頂点・選択状態をクリア
   useEffect(() => {
     setTextInput(null)
@@ -1378,9 +1386,9 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
       target.setPointerCapture(e.pointerId)
     } catch {}
 
-    // パン移動（手のひらツール、Spaceキー押下中、中ボタン、右ボタン）の判定
+    // パン移動（描画モードの手のひらツール、Spaceキー押下中、中ボタン、右ボタン）の判定
     const isPanTrigger =
-      activeTool === 'pan' ||
+      (appMode === 'draw' && activeTool === 'pan') ||
       isSpacePressed ||
       e.button === 1 ||
       e.button === 2
@@ -1704,9 +1712,9 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     }
   }
 
-  // カーソルスタイルの判定（スペースキー押下中または手のひらツールの時は grab/grabbing）
+  // カーソルスタイルの判定（スペースキー押下中または描画モードの手のひらツールの時は grab/grabbing）
   const getCursorClass = () => {
-    if (isSpacePressed || activeTool === 'pan') {
+    if (isSpacePressed || (appMode === 'draw' && activeTool === 'pan')) {
       return isPanning ? 'cursor-grabbing' : 'cursor-grab'
     }
     if (appMode === 'eraser') return 'cursor-crosshair'
@@ -1725,7 +1733,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
         // 背景クリック時もパン移動できるようにする
         if (
           e.target === containerRef.current ||
-          activeTool === 'pan' ||
+          (appMode === 'draw' && activeTool === 'pan') ||
           isSpacePressed ||
           e.button === 1 ||
           e.button === 2
@@ -1761,7 +1769,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
         }
       }}
       className={`flex-1 overflow-hidden bg-slate-950 p-8 flex items-center justify-center relative select-none ${
-        isSpacePressed || activeTool === 'pan' ? (isPanning ? 'cursor-grabbing' : 'cursor-grab') : ''
+        isSpacePressed || (appMode === 'draw' && activeTool === 'pan') ? (isPanning ? 'cursor-grabbing' : 'cursor-grab') : ''
       }`}
     >
       {pageImage && pageInfo ? (
@@ -1799,6 +1807,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
               const isSelected = selectedDrawingId === item.id
               const isEraserMode = appMode === 'draw' && activeTool === 'draw_eraser'
               const isRulerMode = appMode === 'draw' && activeTool === 'ruler'
+              const itemPointerEvents = appMode === 'draw' ? 'pointer-events-auto' : 'pointer-events-none'
 
               if (item.tool === 'arrow' || item.tool === 'line') {
                 if (!item.points || item.points.length < 2) return null
@@ -1817,7 +1826,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
                 return (
                   <g
                     key={item.id}
-                    className={`pointer-events-auto group ${
+                    className={`${itemPointerEvents} group ${
                       isEraserMode
                         ? 'cursor-pointer hover:opacity-60'
                         : isRulerMode
@@ -1966,7 +1975,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
                 return (
                   <g
                     key={item.id}
-                    className={`pointer-events-auto group ${
+                    className={`${itemPointerEvents} group ${
                       isEraserMode
                         ? 'cursor-pointer hover:opacity-60'
                         : isRulerMode
@@ -2080,7 +2089,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
                 return (
                   <g
                     key={item.id}
-                    className={`pointer-events-auto group ${
+                    className={`${itemPointerEvents} group ${
                       isEraserMode
                         ? 'cursor-pointer hover:opacity-60'
                         : isRulerMode
@@ -2191,7 +2200,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
                 return (
                   <g
                     key={item.id}
-                    className={`pointer-events-auto group ${
+                    className={`${itemPointerEvents} group ${
                       isEraserMode
                         ? 'cursor-pointer hover:opacity-60'
                         : isRulerMode
@@ -2301,7 +2310,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
                 return (
                   <g
                     key={item.id}
-                    className={`pointer-events-auto group ${
+                    className={`${itemPointerEvents} group ${
                       isEraserMode
                         ? 'cursor-pointer hover:opacity-60'
                         : activeTool === 'select' || isSelected
@@ -2397,7 +2406,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
                   <g
                     key={item.id}
                     transform={rot ? `rotate(${rot}, ${cx}, ${cy})` : undefined}
-                    className={`pointer-events-auto group ${
+                    className={`${itemPointerEvents} group ${
                       isEraserMode
                         ? 'cursor-pointer hover:opacity-60'
                         : activeTool === 'select' || isSelected
@@ -2569,7 +2578,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
                   <g
                     key={item.id}
                     transform={rot ? `rotate(${rot}, ${cx}, ${cy})` : undefined}
-                    className={`pointer-events-auto group ${
+                    className={`${itemPointerEvents} group ${
                       isEraserMode
                         ? 'cursor-pointer hover:opacity-60'
                         : activeTool === 'select' || isSelected
@@ -3135,7 +3144,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
             }}
             className={`absolute inset-0 select-none z-10 ${getCursorClass()}`}
             title={
-              isSpacePressed || activeTool === 'pan'
+              isSpacePressed || (appMode === 'draw' && activeTool === 'pan')
                 ? 'ドラッグして用紙を自由に移動（スクロール）'
                 : appMode === 'eraser'
                 ? 'マウスドラッグで消去したい範囲を囲んでください'
