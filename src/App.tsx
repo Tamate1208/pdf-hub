@@ -4,6 +4,8 @@ import { Toolbar } from './components/Toolbar'
 import { PdfViewer } from './components/PdfViewer'
 import { ThumbnailSidebar } from './components/ThumbnailSidebar'
 import { DeskSidebar } from './components/DeskSidebar'
+import { ReviewToolbar } from './components/ReviewToolbar'
+import { ReviewSidebar } from './components/ReviewSidebar'
 import { DeskDoc, DeskItem } from './types/desk'
 import { createDeskItemsFromPdfFile, buildMergedPdfFromDesk } from './utils/deskService'
 import {
@@ -33,6 +35,10 @@ import {
   HistoryAction,
   BookmarkItem,
   RulerMeasureMode,
+  ReviewComment,
+  ReviewStamp,
+  ReviewTool,
+  ProofreadingMark,
 } from './types/drawing'
 import {
   FileUp,
@@ -48,6 +54,8 @@ import {
   Minimize2,
   Download,
   Layers,
+  ClipboardCheck,
+  CheckSquare,
 } from 'lucide-react'
 
 function formatBytes(bytes?: number | null): string {
@@ -99,6 +107,16 @@ export default function App() {
   const [arrowHead, setArrowHead] = useState<ArrowHead>('end')
   const [checkSize, setCheckSize] = useState<number>(14)
   const [drawings, setDrawings] = useState<DrawingItem[]>([])
+
+  // 🔍 審査・確認（Review / Audit）用 state
+  const [reviewComments, setReviewComments] = useState<ReviewComment[]>([])
+  const [reviewStamps, setReviewStamps] = useState<ReviewStamp[]>([])
+  const [proofreadingMarks, setProofreadingMarks] = useState<ProofreadingMark[]>([])
+  const [verifiedPages, setVerifiedPages] = useState<Set<number>>(new Set())
+  const [activeReviewTool, setActiveReviewTool] = useState<ReviewTool>('pin')
+  const [isReviewSidebarOpen, setIsReviewSidebarOpen] = useState<boolean>(true)
+  const [selectedReviewCommentId, setSelectedReviewCommentId] = useState<string | null>(null)
+  const [selectedProofreadingMarkId, setSelectedProofreadingMarkId] = useState<string | null>(null)
 
   // 物差しの縮尺 (1:100 が図面標準) と計測モード ('distance' | 'area')
   const [rulerScale, setRulerScale] = useState<number>(100)
@@ -1728,13 +1746,27 @@ export default function App() {
     try {
       setIsProcessing(true)
       const mergedBytes = await buildMergedPdfFromDesk(deskItems, deskDocs)
-      const file = new File([mergedBytes as BlobPart], `編纂書類_${new Date().toISOString().slice(0, 10)}.pdf`, {
+      const mergedName = `編纂書類_${new Date().toISOString().slice(0, 10)}.pdf`
+      const file = new File([mergedBytes as BlobPart], mergedName, {
         type: 'application/pdf',
       })
+
+      // 1. メイン画面の読み込みファイルを最新の編纂PDFに入れ替え
       await loadPdf(file)
+
+      // 2. 右ペイン（編集ワークスペース）を空にする
+      setDeskItems([])
+
+      // 3. パターンB: 左ペイン（素材プール）も、新しく出来上がった「編纂書類.pdf」に入れ替え
+      const newDocId = `doc_${Date.now()}_merged`
+      const { doc: newDoc, items: newSourceItems } = await createDeskItemsFromPdfFile(file, newDocId)
+      setDeskDocs(new Map([[newDocId, newDoc]]))
+      setDeskSourceItems(newSourceItems)
+
+      // 4. 作業机を閉じて墨消しモードへ遷移
       setIsDeskOpen(false)
       handleWorkspaceModeChange('redact')
-      showToast('✨ 作業机で編纂したPDFをメイン画面に読み込みました！このまま墨消しや描画・計測が行えます。')
+      showToast('✨ 編纂したPDFをメイン画面に読み込みました！作業机の素材も編纂後の書類に更新されました。')
     } catch (err) {
       console.error('メイン読み込みエラー:', err)
       alert('編纂PDFの読み込みに失敗しました。')
@@ -1774,6 +1806,12 @@ export default function App() {
       setHistory([])
       setDeskItems([])
       setDeskDocs(new Map())
+      setReviewComments([])
+      setReviewStamps([])
+      setProofreadingMarks([])
+      setVerifiedPages(new Set())
+      setSelectedReviewCommentId(null)
+      setSelectedProofreadingMarkId(null)
       setLastAddedRect(null)
       setLastOptimizeResult(null)
       setPageImages((prev) => {
@@ -1786,6 +1824,86 @@ export default function App() {
       })
     }
   }
+
+  // 🔍 審査・確認（Review / Audit）用ハンドラ群
+  const handleAddReviewComment = (data: Omit<ReviewComment, 'id' | 'number' | 'createdAt'>) => {
+    const nextNumber =
+      reviewComments.length > 0 ? Math.max(...reviewComments.map((c) => c.number)) + 1 : 1
+    const newComment: ReviewComment = {
+      id: `rev-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      number: nextNumber,
+      color: data.color || 'yellow',
+      createdAt: Date.now(),
+      ...data,
+    }
+    setReviewComments((prev) => [...prev, newComment])
+    setSelectedReviewCommentId(newComment.id)
+  }
+
+  const handleUpdateReviewComment = (id: string, updates: Partial<ReviewComment>) => {
+    setReviewComments((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, ...updates } : c))
+    )
+  }
+
+  const handleRemoveReviewComment = (id: string) => {
+    setReviewComments((prev) => prev.filter((c) => c.id !== id))
+    if (selectedReviewCommentId === id) {
+      setSelectedReviewCommentId(null)
+    }
+  }
+
+  const handleToggleCommentStatus = (id: string) => {
+    setReviewComments((prev) =>
+      prev.map((c) =>
+        c.id === id
+          ? { ...c, status: c.status === 'unresolved' ? 'resolved' : 'unresolved' }
+          : c
+      )
+    )
+  }
+
+  const handleAddReviewStamp = (data: Omit<ReviewStamp, 'id' | 'createdAt'>) => {
+    const newStamp: ReviewStamp = {
+      id: `stamp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      createdAt: Date.now(),
+      ...data,
+    }
+    setReviewStamps((prev) => [...prev, newStamp])
+  }
+
+  const handleRemoveReviewStamp = (id: string) => {
+    setReviewStamps((prev) => prev.filter((s) => s.id !== id))
+  }
+
+  const handleAddProofreadingMark = (data: Omit<ProofreadingMark, 'id' | 'createdAt'>) => {
+    const newMark: ProofreadingMark = {
+      id: `mark-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      createdAt: Date.now(),
+      ...data,
+    }
+    setProofreadingMarks((prev) => [...prev, newMark])
+    setSelectedProofreadingMarkId(newMark.id)
+  }
+
+  const handleRemoveProofreadingMark = (id: string) => {
+    setProofreadingMarks((prev) => prev.filter((m) => m.id !== id))
+    setSelectedProofreadingMarkId((prev) => (prev === id ? null : prev))
+  }
+
+  const handleTogglePageVerified = (pageIndex: number) => {
+    setVerifiedPages((prev) => {
+      const next = new Set(prev)
+      if (next.has(pageIndex)) {
+        next.delete(pageIndex)
+      } else {
+        next.add(pageIndex)
+      }
+      return next
+    })
+  }
+
+  const unresolvedReviewCount = reviewComments.filter((c) => c.status === 'unresolved').length
 
   const currentPageRedactions = redactions.filter((r) => r.pageIndex === currentPage)
   const currentPageDrawings = drawings.filter((d) => d.pageIndex === currentPage)
@@ -1822,6 +1940,9 @@ export default function App() {
         onWorkspaceModeChange={handleWorkspaceModeChange}
         totalRedactions={redactions.length}
         totalDrawings={drawings.length}
+        unresolvedReviews={unresolvedReviewCount}
+        verifiedPageCount={verifiedPages.size}
+        numPages={docInfo?.numPages || 0}
         hasOtherEdits={
           Object.values(pageRotations).some((r) => r !== 0) || bookmarks.length > 0
         }
@@ -2017,6 +2138,44 @@ export default function App() {
                 <div className="flex items-center justify-between pt-3 border-t border-slate-800/80 text-xs font-bold text-amber-400 group-hover:text-amber-300">
                   <span>軽量化画面を開く →</span>
                   <Minimize2 className="w-4 h-4" />
+                </div>
+              </div>
+
+              {/* ⑤ 🔍 書類審査・確認カード */}
+              <div
+                onClick={() => enterWorkspaceMode('review')}
+                onDragOver={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    openFilesInMode(e.dataTransfer.files, 'review')
+                  }
+                }}
+                className="group p-6 rounded-2xl border border-slate-800 hover:border-indigo-500/80 bg-slate-900/60 hover:bg-slate-900/95 transition flex flex-col justify-between cursor-pointer shadow-xl relative overflow-hidden md:col-span-2"
+              >
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="w-12 h-12 rounded-xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-400 group-hover:scale-110 transition">
+                      <ClipboardCheck className="w-6 h-6" />
+                    </div>
+                    <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-gradient-to-r from-indigo-500/20 to-rose-500/20 text-indigo-300 border border-indigo-500/30">
+                      淡色付箋・マーカー・下線・囲み
+                    </span>
+                  </div>
+                  <h3 className="text-lg font-extrabold text-white mb-1.5 group-hover:text-indigo-300 transition">
+                    🔍 書類審査・校正（専用ワークスペース）
+                  </h3>
+                  <p className="text-xs text-slate-400 leading-relaxed mb-4">
+                    半透明蛍光マーカー・取り消し線・下線・囲み枠の直感的なテキストマークアップと、6色淡色パステル付箋、確認済進捗管理で、設計図面や各種書類の審査・照合をシンプルかつ確実に行います。
+                  </p>
+                </div>
+                <div className="flex items-center justify-between pt-3 border-t border-slate-800/80 text-xs font-bold text-indigo-400 group-hover:text-indigo-300">
+                  <span>審査・確認画面を開く →</span>
+                  <ClipboardCheck className="w-4 h-4" />
                 </div>
               </div>
             </div>
@@ -2305,96 +2464,138 @@ export default function App() {
           />
         </div>
       ) : pdfBytes && docInfo ? (
-        /* 📄 ファイル読み込み済み（墨消し / 描画・計測モード） */
-        <>
-          <Toolbar
-            workspaceMode={workspaceMode}
-            currentPage={currentPage}
-            numPages={docInfo.numPages}
-            zoom={zoom}
-            colorMode={colorMode}
-            selectMode={selectMode}
-            pageRedactionCount={currentPageRedactions.length}
-            totalRedactionCount={redactions.length}
-            hasLastSelectedArea={lastAddedRect !== null}
-            appMode={appMode}
-            activeTool={activeTool}
-            drawColor={drawColor}
-            lineWidth={lineWidth}
-            fontSize={fontSize}
-            fillMode={fillMode}
-            arrowHead={arrowHead}
-            checkSize={checkSize}
-            pageDrawingCount={currentPageDrawings.length}
-            totalDrawingCount={drawings.length}
-            canUndo={history.length > 0}
-            isDeskOpen={isDeskOpen}
-            onRotateCurrentPage={() => handleRotatePage(currentPage, 90)}
-            onAddCurrentPageToDesk={() => handleAddToDesk(currentPage)}
-            onAddAllPagesToDesk={handleAddAllPagesToDesk}
-            onToggleDesk={() => setIsDeskOpen((prev) => !prev)}
-            onPageChange={setCurrentPage}
-            onZoomChange={setZoom}
-            onColorModeChange={setColorMode}
-            onSelectModeChange={setSelectMode}
-            onClearPageRedactions={handleClearPageRedactions}
-            onClearAllRedactions={handleClearAllRedactions}
-            onKeywordSearch={handleKeywordSearch}
-            onApplyAreaToAllPages={handleApplyAreaToAllPages}
-            onAppModeChange={setAppMode}
-            onToolChange={setActiveTool}
-            onDrawColorChange={setDrawColor}
-            onLineWidthChange={setLineWidth}
-            onFontSizeChange={setFontSize}
-            onFillModeChange={setFillMode}
-            onArrowHeadChange={setArrowHead}
-            onCheckSizeChange={setCheckSize}
-            onInsertImage={handleInsertImage}
-            rulerScale={rulerScale}
-            onRulerScaleChange={setRulerScale}
-            rulerMeasureMode={rulerMeasureMode}
-            onRulerMeasureModeChange={setRulerMeasureMode}
-            onUndo={handleUndo}
-            onResetView={() => setResetViewTrigger(Date.now())}
-            onFitToWindow={() => setFitViewTrigger(Date.now())}
-          />
-
-          <div className="flex-1 flex overflow-hidden">
-            {docInfo && (
-              <ThumbnailSidebar
-                width={leftSidebarWidth}
-                onResizeWidth={handleResizeLeftSidebar}
-                pages={docInfo.pages}
-                currentPage={currentPage}
-                redactions={redactions}
-                thumbnails={thumbnails}
-                pageRotations={pageRotations}
-                bookmarks={bookmarks}
-                selectedPagesForExtract={selectedPagesForExtract}
-                onSelectPage={setCurrentPage}
-                onRotatePage={handleRotatePage}
-                onDeletePage={handleDeletePage}
-                onMergePdfs={handleMergePdfs}
-                onExtractPages={handleExtractPages}
-                onTogglePageSelectForExtract={handleTogglePageSelectForExtract}
-                onSelectAllPagesForExtract={handleSelectAllPagesForExtract}
-                onClearPageSelectionForExtract={handleClearPageSelectionForExtract}
-                onAddToDesk={handleAddToDesk}
-                onAddSelectedToDesk={handleAddSelectedToDesk}
-                onAddBookmark={handleAddBookmark}
-                onUpdateBookmark={handleUpdateBookmark}
-                onDeleteBookmark={handleDeleteBookmark}
-              />
-            )}
-
-            <PdfViewer
-              pageImage={pageImages.get(currentPage) || null}
-              pageInfo={docInfo.pages[currentPage] || null}
+        /* 📄 ファイル読み込み済み */
+        workspaceMode === 'review' ? (
+          /* 🔍 審査・確認ワークスペース */
+          <>
+            <ReviewToolbar
               currentPage={currentPage}
               numPages={docInfo.numPages}
-              redactions={currentPageRedactions}
-              colorMode={colorMode}
               zoom={zoom}
+              activeTool={activeReviewTool}
+              onToolChange={setActiveReviewTool}
+              onPageChange={setCurrentPage}
+              onZoomChange={setZoom}
+              onResetView={() => setResetViewTrigger(Date.now())}
+              onFitToWindow={() => setFitViewTrigger(Date.now())}
+              isCurrentPageVerified={verifiedPages.has(currentPage)}
+              onToggleCurrentPageVerified={() => handleTogglePageVerified(currentPage)}
+              verifiedPageCount={verifiedPages.size}
+              totalCommentsCount={reviewComments.length}
+              unresolvedCount={unresolvedReviewCount}
+              isSidebarOpen={isReviewSidebarOpen}
+              onToggleSidebar={() => setIsReviewSidebarOpen((prev) => !prev)}
+            />
+
+            <div className="flex-1 flex overflow-hidden">
+              {docInfo && (
+                <ThumbnailSidebar
+                  width={leftSidebarWidth}
+                  onResizeWidth={handleResizeLeftSidebar}
+                  pages={docInfo.pages}
+                  currentPage={currentPage}
+                  redactions={redactions}
+                  thumbnails={thumbnails}
+                  pageRotations={pageRotations}
+                  bookmarks={bookmarks}
+                  selectedPagesForExtract={selectedPagesForExtract}
+                  verifiedPages={verifiedPages}
+                  reviewComments={reviewComments}
+                  onSelectPage={setCurrentPage}
+                  onRotatePage={handleRotatePage}
+                  onDeletePage={handleDeletePage}
+                  onMergePdfs={handleMergePdfs}
+                  onExtractPages={handleExtractPages}
+                  onTogglePageSelectForExtract={handleTogglePageSelectForExtract}
+                  onSelectAllPagesForExtract={handleSelectAllPagesForExtract}
+                  onClearPageSelectionForExtract={handleClearPageSelectionForExtract}
+                  onAddToDesk={handleAddToDesk}
+                  onAddSelectedToDesk={handleAddSelectedToDesk}
+                  onAddBookmark={handleAddBookmark}
+                  onUpdateBookmark={handleUpdateBookmark}
+                  onDeleteBookmark={handleDeleteBookmark}
+                />
+              )}
+
+              <PdfViewer
+                pageImage={pageImages.get(currentPage) || null}
+                pageInfo={docInfo.pages[currentPage] || null}
+                currentPage={currentPage}
+                numPages={docInfo.numPages}
+                redactions={currentPageRedactions}
+                colorMode={colorMode}
+                zoom={zoom}
+                appMode={appMode}
+                activeTool={activeTool}
+                drawColor={drawColor}
+                lineWidth={lineWidth}
+                fontSize={fontSize}
+                fillMode={fillMode}
+                arrowHead={arrowHead}
+                checkSize={checkSize}
+                drawings={currentPageDrawings}
+                rulerScale={rulerScale}
+                rulerMeasureMode={rulerMeasureMode}
+                workspaceMode="review"
+                activeReviewTool={activeReviewTool}
+                reviewComments={reviewComments}
+                reviewStamps={reviewStamps}
+                proofreadingMarks={proofreadingMarks}
+                selectedReviewCommentId={selectedReviewCommentId}
+                selectedProofreadingMarkId={selectedProofreadingMarkId}
+                onSelectReviewComment={setSelectedReviewCommentId}
+                onSelectProofreadingMark={setSelectedProofreadingMarkId}
+                onAddReviewComment={handleAddReviewComment}
+                onUpdateReviewComment={handleUpdateReviewComment}
+                onRemoveReviewComment={handleRemoveReviewComment}
+                onAddReviewStamp={handleAddReviewStamp}
+                onRemoveReviewStamp={handleRemoveReviewStamp}
+                onAddProofreadingMark={handleAddProofreadingMark}
+                onRemoveProofreadingMark={handleRemoveProofreadingMark}
+                resetViewTrigger={resetViewTrigger}
+                fitViewTrigger={fitViewTrigger}
+                onPageChange={setCurrentPage}
+                onZoomChange={setZoom}
+                onAddRedaction={handleAddRedaction}
+                onRemoveRedaction={handleRemoveRedaction}
+                onAddDrawing={handleAddDrawing}
+                onUpdateDrawing={handleUpdateDrawing}
+                onRemoveDrawing={handleRemoveDrawing}
+              />
+
+              <ReviewSidebar
+                isOpen={isReviewSidebarOpen}
+                onClose={() => setIsReviewSidebarOpen(false)}
+                comments={reviewComments}
+                verifiedPages={verifiedPages}
+                numPages={docInfo.numPages}
+                currentPage={currentPage}
+                onPageChange={setCurrentPage}
+                onToggleCommentStatus={handleToggleCommentStatus}
+                onUpdateCommentText={(id, text) => handleUpdateReviewComment(id, { text })}
+                onDeleteComment={handleRemoveReviewComment}
+                selectedCommentId={selectedReviewCommentId}
+                onSelectComment={(id) => {
+                  setSelectedReviewCommentId(id)
+                  const c = reviewComments.find((x) => x.id === id)
+                  if (c) setCurrentPage(c.pageIndex)
+                }}
+              />
+            </div>
+          </>
+        ) : (
+          /* 📄 墨消し / 描画・校正モード */
+          <>
+            <Toolbar
+              workspaceMode={workspaceMode}
+              currentPage={currentPage}
+              numPages={docInfo.numPages}
+              zoom={zoom}
+              colorMode={colorMode}
+              selectMode={selectMode}
+              pageRedactionCount={currentPageRedactions.length}
+              totalRedactionCount={redactions.length}
+              hasLastSelectedArea={lastAddedRect !== null}
               appMode={appMode}
               activeTool={activeTool}
               drawColor={drawColor}
@@ -2403,58 +2604,137 @@ export default function App() {
               fillMode={fillMode}
               arrowHead={arrowHead}
               checkSize={checkSize}
-              drawings={currentPageDrawings}
-              rulerScale={rulerScale}
-              rulerMeasureMode={rulerMeasureMode}
-              resetViewTrigger={resetViewTrigger}
-              fitViewTrigger={fitViewTrigger}
+              pageDrawingCount={currentPageDrawings.length}
+              totalDrawingCount={drawings.length}
+              canUndo={history.length > 0}
+              isDeskOpen={isDeskOpen}
+              onRotateCurrentPage={() => handleRotatePage(currentPage, 90)}
+              onAddCurrentPageToDesk={() => handleAddToDesk(currentPage)}
+              onAddAllPagesToDesk={handleAddAllPagesToDesk}
+              onToggleDesk={() => setIsDeskOpen((prev) => !prev)}
               onPageChange={setCurrentPage}
               onZoomChange={setZoom}
-              onAddRedaction={handleAddRedaction}
-              onRemoveRedaction={handleRemoveRedaction}
-              onAddDrawing={handleAddDrawing}
-              onUpdateDrawing={handleUpdateDrawing}
-              onRemoveDrawing={handleRemoveDrawing}
+              onColorModeChange={setColorMode}
+              onSelectModeChange={setSelectMode}
+              onClearPageRedactions={handleClearPageRedactions}
+              onClearAllRedactions={handleClearAllRedactions}
+              onKeywordSearch={handleKeywordSearch}
+              onApplyAreaToAllPages={handleApplyAreaToAllPages}
+              onAppModeChange={setAppMode}
+              onToolChange={setActiveTool}
+              onDrawColorChange={setDrawColor}
+              onLineWidthChange={setLineWidth}
+              onFontSizeChange={setFontSize}
+              onFillModeChange={setFillMode}
+              onArrowHeadChange={setArrowHead}
+              onCheckSizeChange={setCheckSize}
+              onInsertImage={handleInsertImage}
+              rulerScale={rulerScale}
+              onRulerScaleChange={setRulerScale}
+              rulerMeasureMode={rulerMeasureMode}
+              onRulerMeasureModeChange={setRulerMeasureMode}
+              onUndo={handleUndo}
+              onResetView={() => setResetViewTrigger(Date.now())}
+              onFitToWindow={() => setFitViewTrigger(Date.now())}
             />
 
-            <DeskSidebar
-              width={rightSidebarWidth}
-              isOpen={isDeskOpen}
-              sourceItems={deskSourceItems}
-              items={deskItems}
-              docsMap={deskDocs}
-              currentPageIndex={currentPage}
-              currentDocName={fileName}
-              selectedPageCount={selectedPagesForExtract.size}
-              onClose={() => setIsDeskOpen(false)}
-              onResizeWidth={handleResizeRightSidebar}
-              onAddCurrentPage={() => handleAddToDesk(currentPage)}
-              onAddSelectedPages={() =>
-                handleAddSelectedToDesk(Array.from(selectedPagesForExtract).sort((a, b) => a - b))
-              }
-              onAddAllPages={handleAddAllPagesToDesk}
-              onAddPdfFiles={handleAddPdfFilesToDesk}
-              onMoveItem={handleMoveDeskItem}
-              onRotateItem={handleRotateDeskItem}
-              onRemoveItem={handleRemoveDeskItem}
-              onRotateTargetItems={handleRotateTargetItems}
-              onRemoveTargetItems={handleRemoveTargetItems}
-              onExtractItemsToWorkspace={handleExtractItemsToDesk}
-              onMoveGroup={handleMoveDeskGroup}
-              onRotateGroup={handleRotateDeskGroup}
-              onRemoveGroup={handleRemoveDeskGroup}
-              onLoadSingleDocAsCurrent={handleLoadSingleDeskDoc}
-              onClearAll={handleClearAllDesk}
-              onExportMergedPdf={handleExportMergedPdf}
-              onPrintMergedPdf={handlePrintMergedPdf}
-              onLoadAsCurrentDoc={handleLoadDeskAsCurrentDoc}
-              onSelectDeskItemPreview={handleSelectDeskItemPreview}
-              isProcessing={isProcessing}
-            />
-          </div>
-        </>
+            <div className="flex-1 flex overflow-hidden">
+              {docInfo && (
+                <ThumbnailSidebar
+                  width={leftSidebarWidth}
+                  onResizeWidth={handleResizeLeftSidebar}
+                  pages={docInfo.pages}
+                  currentPage={currentPage}
+                  redactions={redactions}
+                  thumbnails={thumbnails}
+                  pageRotations={pageRotations}
+                  bookmarks={bookmarks}
+                  selectedPagesForExtract={selectedPagesForExtract}
+                  onSelectPage={setCurrentPage}
+                  onRotatePage={handleRotatePage}
+                  onDeletePage={handleDeletePage}
+                  onMergePdfs={handleMergePdfs}
+                  onExtractPages={handleExtractPages}
+                  onTogglePageSelectForExtract={handleTogglePageSelectForExtract}
+                  onSelectAllPagesForExtract={handleSelectAllPagesForExtract}
+                  onClearPageSelectionForExtract={handleClearPageSelectionForExtract}
+                  onAddToDesk={handleAddToDesk}
+                  onAddSelectedToDesk={handleAddSelectedToDesk}
+                  onAddBookmark={handleAddBookmark}
+                  onUpdateBookmark={handleUpdateBookmark}
+                  onDeleteBookmark={handleDeleteBookmark}
+                />
+              )}
+
+              <PdfViewer
+                pageImage={pageImages.get(currentPage) || null}
+                pageInfo={docInfo.pages[currentPage] || null}
+                currentPage={currentPage}
+                numPages={docInfo.numPages}
+                redactions={currentPageRedactions}
+                colorMode={colorMode}
+                zoom={zoom}
+                appMode={appMode}
+                activeTool={activeTool}
+                drawColor={drawColor}
+                lineWidth={lineWidth}
+                fontSize={fontSize}
+                fillMode={fillMode}
+                arrowHead={arrowHead}
+                checkSize={checkSize}
+                drawings={currentPageDrawings}
+                rulerScale={rulerScale}
+                rulerMeasureMode={rulerMeasureMode}
+                resetViewTrigger={resetViewTrigger}
+                fitViewTrigger={fitViewTrigger}
+                onPageChange={setCurrentPage}
+                onZoomChange={setZoom}
+                onAddRedaction={handleAddRedaction}
+                onRemoveRedaction={handleRemoveRedaction}
+                onAddDrawing={handleAddDrawing}
+                onUpdateDrawing={handleUpdateDrawing}
+                onRemoveDrawing={handleRemoveDrawing}
+              />
+
+              <DeskSidebar
+                width={rightSidebarWidth}
+                isOpen={isDeskOpen}
+                sourceItems={deskSourceItems}
+                items={deskItems}
+                docsMap={deskDocs}
+                currentPageIndex={currentPage}
+                currentDocName={fileName}
+                selectedPageCount={selectedPagesForExtract.size}
+                onClose={() => setIsDeskOpen(false)}
+                onResizeWidth={handleResizeRightSidebar}
+                onAddCurrentPage={() => handleAddToDesk(currentPage)}
+                onAddSelectedPages={() =>
+                  handleAddSelectedToDesk(Array.from(selectedPagesForExtract).sort((a, b) => a - b))
+                }
+                onAddAllPages={handleAddAllPagesToDesk}
+                onAddPdfFiles={handleAddPdfFilesToDesk}
+                onMoveItem={handleMoveDeskItem}
+                onRotateItem={handleRotateDeskItem}
+                onRemoveItem={handleRemoveDeskItem}
+                onRotateTargetItems={handleRotateTargetItems}
+                onRemoveTargetItems={handleRemoveTargetItems}
+                onExtractItemsToWorkspace={handleExtractItemsToDesk}
+                onMoveGroup={handleMoveDeskGroup}
+                onRotateGroup={handleRotateDeskGroup}
+                onRemoveGroup={handleRemoveDeskGroup}
+                onLoadSingleDocAsCurrent={handleLoadSingleDeskDoc}
+                onClearAll={handleClearAllDesk}
+                onExportMergedPdf={handleExportMergedPdf}
+                onPrintMergedPdf={handlePrintMergedPdf}
+                onLoadAsCurrentDoc={handleLoadDeskAsCurrentDoc}
+                onSelectDeskItemPreview={handleSelectDeskItemPreview}
+                isProcessing={isProcessing}
+              />
+            </div>
+          </>
+        )
       ) : (
-        /* 🎯 モード選択後のファイル待機画面（墨消し / 描画・計測モードでここからファイル選択・ドラッグ＆ドロップが可能） */
+        /* 🎯 モード選択後のファイル待機画面（墨消し / 描画・計測 / 審査・確認モードでここからファイル選択・ドラッグ＆ドロップが可能） */
         <div className="flex-1 flex overflow-hidden">
           <div className="flex-1 flex flex-col items-center justify-center p-4 sm:p-8 bg-slate-950 overflow-y-auto">
             <div className="max-w-xl w-full flex flex-col items-center">
@@ -2463,6 +2743,8 @@ export default function App() {
                 className={`w-full p-8 sm:p-12 border-2 border-dashed rounded-2xl transition flex flex-col items-center justify-center text-center bg-slate-900/60 hover:bg-slate-900/90 cursor-pointer group shadow-2xl ${
                   workspaceMode === 'redact'
                     ? 'border-rose-500/40 hover:border-rose-500'
+                    : workspaceMode === 'review'
+                    ? 'border-indigo-500/40 hover:border-indigo-500'
                     : 'border-blue-500/40 hover:border-blue-500'
                 }`}
               >
@@ -2470,11 +2752,15 @@ export default function App() {
                   className={`w-16 h-16 rounded-2xl flex items-center justify-center mb-5 group-hover:scale-105 transition ${
                     workspaceMode === 'redact'
                       ? 'bg-rose-500/15 border border-rose-500/30 text-rose-400'
+                      : workspaceMode === 'review'
+                      ? 'bg-indigo-500/15 border border-indigo-500/30 text-indigo-400'
                       : 'bg-blue-500/15 border border-blue-500/30 text-blue-400'
                   }`}
                 >
                   {workspaceMode === 'redact' ? (
                     <Eraser className="w-8 h-8" />
+                  ) : workspaceMode === 'review' ? (
+                    <ClipboardCheck className="w-8 h-8" />
                   ) : (
                     <PenTool className="w-8 h-8" />
                   )}
@@ -2484,23 +2770,31 @@ export default function App() {
                   className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full mb-2 ${
                     workspaceMode === 'redact'
                       ? 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
+                      : workspaceMode === 'review'
+                      ? 'bg-gradient-to-r from-indigo-500/20 to-rose-500/20 text-indigo-300 border border-indigo-500/30'
                       : 'bg-blue-500/15 text-blue-300 border border-blue-500/30'
                   }`}
                 >
                   {workspaceMode === 'redact'
                     ? '🧹 墨消し（不可逆Redaction）モード'
+                    : workspaceMode === 'review'
+                    ? '🔍 審査・確認（指摘ピン・スタンプ）モード'
                     : '✏️ 描画・計測（朱書き・透明物差し）モード'}
                 </span>
 
                 <h3 className="text-lg sm:text-xl font-extrabold text-white mb-2">
                   {workspaceMode === 'redact'
                     ? '墨消しするPDFをここにドラッグ＆ドロップ'
+                    : workspaceMode === 'review'
+                    ? '審査・確認するPDFをここにドラッグ＆ドロップ'
                     : '描画・計測するPDFをここにドラッグ＆ドロップ'}
                 </h3>
 
                 <p className="text-xs text-slate-400 mb-6 max-w-md leading-relaxed">
                   {workspaceMode === 'redact'
                     ? '黒塗り・白塗り、テキスト自動吸着、自由矩形、キーワード一括検索で機密箇所を完全消去します。'
+                    : workspaceMode === 'review'
+                    ? '審査スタンプ押印、指摘ピン配置、確認済ページ進捗バーで設計図面や書類の照合審査を効率的に行います。'
                     : '文字入力、矢印・円・多角形・チェックマーク、印鑑画像挿入、縮尺対応の透明物差しで図面や書類を校正します。'}
                 </p>
 
@@ -2513,6 +2807,8 @@ export default function App() {
                   className={`px-6 py-3 rounded-xl text-white text-sm font-bold shadow-lg transition active:scale-95 cursor-pointer flex items-center gap-2 ${
                     workspaceMode === 'redact'
                       ? 'bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 shadow-rose-600/25'
+                      : workspaceMode === 'review'
+                      ? 'bg-gradient-to-r from-indigo-600 to-rose-600 hover:from-indigo-500 hover:to-rose-500 shadow-indigo-600/25'
                       : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 shadow-blue-600/25'
                   }`}
                 >

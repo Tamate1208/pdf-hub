@@ -1,6 +1,6 @@
-import React, { useState, useRef, useEffect } from 'react'
+import React, { useState, useRef, useEffect, useMemo } from 'react'
 import { PdfPageInfo, RedactRect } from '../utils/mupdfService'
-import { BookmarkItem } from '../types/drawing'
+import { BookmarkItem, ReviewComment } from '../types/drawing'
 import {
   Eraser,
   RotateCw,
@@ -17,6 +17,7 @@ import {
   CheckSquare,
   Square,
   Layers,
+  MapPin,
 } from 'lucide-react'
 
 interface ThumbnailSidebarProps {
@@ -29,6 +30,8 @@ interface ThumbnailSidebarProps {
   pageRotations: Record<number, number>;
   bookmarks: BookmarkItem[];
   selectedPagesForExtract: Set<number>;
+  verifiedPages?: Set<number>;
+  reviewComments?: ReviewComment[];
   onSelectPage: (index: number) => void;
   onRotatePage: (pageIndex: number, deltaDeg: number) => void;
   onDeletePage: (pageIndex: number) => void;
@@ -55,6 +58,8 @@ export const ThumbnailSidebar: React.FC<ThumbnailSidebarProps> = ({
   pageRotations,
   bookmarks,
   selectedPagesForExtract,
+  verifiedPages,
+  reviewComments = [],
   onSelectPage,
   onRotatePage,
   onDeletePage,
@@ -98,6 +103,17 @@ export const ThumbnailSidebar: React.FC<ThumbnailSidebarProps> = ({
   for (const r of redactions) {
     countsByPage.set(r.pageIndex, (countsByPage.get(r.pageIndex) || 0) + 1)
   }
+
+  // ページごとの未解決指摘数を集計
+  const unresolvedByPage = useMemo(() => {
+    const map = new Map<number, number>()
+    reviewComments.forEach((c) => {
+      if (c.status === 'unresolved') {
+        map.set(c.pageIndex, (map.get(c.pageIndex) || 0) + 1)
+      }
+    })
+    return map
+  }, [reviewComments])
 
   // しおりの総数を再帰集計
   const countBookmarks = (items: BookmarkItem[]): number => {
@@ -358,6 +374,22 @@ export const ThumbnailSidebar: React.FC<ThumbnailSidebarProps> = ({
                         <Square className="w-3.5 h-3.5 text-slate-300" />
                       )}
                     </div>
+
+                    {/* 確認済バッジ (右上) */}
+                    {verifiedPages?.has(p.index) && (
+                      <div className={`absolute top-1.5 ${rot !== 0 ? 'right-12' : 'right-1.5'} bg-emerald-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow flex items-center gap-0.5 ring-1 ring-white/30 z-10`}>
+                        <Check className="w-2.5 h-2.5" />
+                        <span>確認済</span>
+                      </div>
+                    )}
+
+                    {/* 未解決指摘バッジ (左下) */}
+                    {(unresolvedByPage.get(p.index) || 0) > 0 && (
+                      <div className="absolute bottom-1.5 left-1.5 bg-rose-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow flex items-center gap-0.5 ring-1 ring-white/30 z-10 animate-pulse">
+                        <MapPin className="w-2.5 h-2.5" />
+                        <span>{unresolvedByPage.get(p.index)}</span>
+                      </div>
+                    )}
 
                     {/* 回転角度バッジ (右上) */}
                     {rot !== 0 && (

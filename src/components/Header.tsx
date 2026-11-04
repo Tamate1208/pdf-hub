@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { Eraser, Download, FileUp, ShieldCheck, Layers, Scale, X, Printer, CheckCircle2, Save, Minimize2, Sparkles, PenTool, FolderKanban, Home } from 'lucide-react'
+import { Eraser, Download, FileUp, ShieldCheck, Layers, Scale, X, Printer, CheckCircle2, Save, Minimize2, Sparkles, PenTool, FolderKanban, Home, ClipboardCheck } from 'lucide-react'
 import { HubSignatureInfo, CompactLevel } from '../utils/mupdfService'
 import { WorkspaceMode } from '../types/drawing'
 
@@ -18,6 +18,10 @@ interface HeaderProps {
   onWorkspaceModeChange: (mode: WorkspaceMode) => void;
   totalRedactions: number;
   totalDrawings?: number;
+  totalReviews?: number;
+  unresolvedReviews?: number;
+  verifiedPageCount?: number;
+  numPages?: number;
   hasOtherEdits?: boolean;
   isProcessing: boolean;
   isDeskOpen?: boolean;
@@ -43,6 +47,10 @@ export const Header: React.FC<HeaderProps> = ({
   onWorkspaceModeChange,
   totalRedactions,
   totalDrawings = 0,
+  totalReviews = 0,
+  unresolvedReviews = 0,
+  verifiedPageCount = 0,
+  numPages = 0,
   hasOtherEdits = false,
   isProcessing,
   isDeskOpen = false,
@@ -64,10 +72,12 @@ export const Header: React.FC<HeaderProps> = ({
     compactedSize: number;
     optimizedImagesCount: number;
   } | null>(null)
-  const totalCount = totalRedactions + totalDrawings
-  const hasAnyEdits = totalCount > 0 || hasOtherEdits
+  const totalCount = totalRedactions + totalDrawings + totalReviews
+  const hasAnyEdits = totalCount > 0 || hasOtherEdits || verifiedPageCount > 0
   const saveBtnLabel = isProcessing
     ? '処理中...'
+    : workspaceMode === 'review'
+    ? '確定保存 (審査済)'
     : totalRedactions > 0 && totalDrawings > 0
     ? '確定保存 (墨消し・校正)'
     : totalDrawings > 0
@@ -131,82 +141,108 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* 中央: モード画面が立ち上がっているとき表示する4モード切替スイッチャー */}
+      {/* 中央: 審査・確認モード時は専用ステータス、他モード時は4モード切替スイッチャー */}
       {!isHomeScreen && (
-        <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800 shadow-inner gap-1">
-          <button
-            onClick={() => onWorkspaceModeChange('redact')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
-              workspaceMode === 'redact'
-                ? 'bg-gradient-to-r from-rose-600 to-pink-600 text-white shadow-md shadow-rose-600/30'
-                : 'text-slate-400 hover:text-white hover:bg-slate-900'
-            }`}
-            title="機密抹消・黒塗り/白塗りモード"
-          >
-            <Eraser className="w-3.5 h-3.5" />
-            <span>墨消し</span>
-            {totalRedactions > 0 && (
-              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
-                workspaceMode === 'redact' ? 'bg-white text-rose-600' : 'bg-rose-500/20 text-rose-300'
-              }`}>
-                {totalRedactions}
+        workspaceMode === 'review' ? (
+          <div className="flex items-center gap-2.5 px-3.5 py-1.5 rounded-xl bg-slate-950/90 border border-indigo-500/30 shadow-inner">
+            <span className="flex items-center gap-1.5 text-xs font-bold text-white">
+              <ClipboardCheck className="w-4 h-4 text-indigo-400" />
+              <span>書類審査・校正専用ワークスペース</span>
+            </span>
+            {totalReviews > 0 && (
+              <span
+                className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                  unresolvedReviews > 0
+                    ? 'bg-rose-500 text-white animate-pulse'
+                    : 'bg-emerald-600 text-white'
+                }`}
+                title={unresolvedReviews > 0 ? `未解決指摘 ${unresolvedReviews}件` : 'すべての指摘が解決済'}
+              >
+                {unresolvedReviews > 0 ? `未解決 ${unresolvedReviews}件` : '全件解決済 ✓'}
               </span>
             )}
-          </button>
-
-          <button
-            onClick={() => onWorkspaceModeChange('draw')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
-              workspaceMode === 'draw'
-                ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md shadow-blue-600/30'
-                : 'text-slate-400 hover:text-white hover:bg-slate-900'
-            }`}
-            title="文字入力・図形・スタンプ・透明物差しによる描画・計測モード"
-          >
-            <PenTool className="w-3.5 h-3.5" />
-            <span>描画・計測</span>
-            {totalDrawings > 0 && (
-              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
-                workspaceMode === 'draw' ? 'bg-white text-blue-600' : 'bg-blue-500/20 text-blue-300'
-              }`}>
-                {totalDrawings}
+            {numPages > 0 && (
+              <span className="text-[11px] font-mono text-slate-400 border-l border-slate-800 pl-2">
+                確認進捗: <strong className="text-emerald-400">{verifiedPageCount}</strong>/{numPages} 頁
               </span>
             )}
-          </button>
+          </div>
+        ) : (
+          <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800 shadow-inner gap-1">
+            <button
+              onClick={() => onWorkspaceModeChange('redact')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                workspaceMode === 'redact'
+                  ? 'bg-gradient-to-r from-rose-600 to-pink-600 text-white shadow-md shadow-rose-600/30'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-900'
+              }`}
+              title="機密抹消・黒塗り/白塗りモード"
+            >
+              <Eraser className="w-3.5 h-3.5" />
+              <span>墨消し</span>
+              {totalRedactions > 0 && (
+                <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
+                  workspaceMode === 'redact' ? 'bg-white text-rose-600' : 'bg-rose-500/20 text-rose-300'
+                }`}>
+                  {totalRedactions}
+                </span>
+              )}
+            </button>
 
-          <button
-            onClick={() => onWorkspaceModeChange('organize')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
-              workspaceMode === 'organize'
-                ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-md shadow-emerald-600/30'
-                : 'text-slate-400 hover:text-white hover:bg-slate-900'
-            }`}
-            title="複数PDFの結合・ページ抽出・回転・作業机によるページ整理モード"
-          >
-            <FolderKanban className="w-3.5 h-3.5" />
-            <span>作業机・整理</span>
-            {deskItemCount > 0 && (
-              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
-                workspaceMode === 'organize' ? 'bg-white text-emerald-700' : 'bg-emerald-600 text-white'
-              }`}>
-                {deskItemCount}
-              </span>
-            )}
-          </button>
+            <button
+              onClick={() => onWorkspaceModeChange('draw')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                workspaceMode === 'draw'
+                  ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md shadow-blue-600/30'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-900'
+              }`}
+              title="文字入力・図形・スタンプ・透明物差しによる描画・計測モード"
+            >
+              <PenTool className="w-3.5 h-3.5" />
+              <span>描画・計測</span>
+              {totalDrawings > 0 && (
+                <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
+                  workspaceMode === 'draw' ? 'bg-white text-blue-600' : 'bg-blue-500/20 text-blue-300'
+                }`}>
+                  {totalDrawings}
+                </span>
+              )}
+            </button>
 
-          <button
-            onClick={() => onWorkspaceModeChange('optimize')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
-              workspaceMode === 'optimize'
-                ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 shadow-md shadow-amber-500/30'
-                : 'text-slate-400 hover:text-amber-300 hover:bg-slate-900'
-            }`}
-            title="テキスト選択を維持したままファイルサイズを軽量化するモード"
-          >
-            <Minimize2 className="w-3.5 h-3.5" />
-            <span>軽量化</span>
-          </button>
-        </div>
+            <button
+              onClick={() => onWorkspaceModeChange('organize')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                workspaceMode === 'organize'
+                  ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-md shadow-emerald-600/30'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-900'
+              }`}
+              title="複数PDFの結合・ページ抽出・回転・作業机によるページ整理モード"
+            >
+              <FolderKanban className="w-3.5 h-3.5" />
+              <span>作業机・整理</span>
+              {deskItemCount > 0 && (
+                <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
+                  workspaceMode === 'organize' ? 'bg-white text-emerald-700' : 'bg-emerald-600 text-white'
+                }`}>
+                  {deskItemCount}
+                </span>
+              )}
+            </button>
+
+            <button
+              onClick={() => onWorkspaceModeChange('optimize')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                workspaceMode === 'optimize'
+                  ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 shadow-md shadow-amber-500/30'
+                  : 'text-slate-400 hover:text-amber-300 hover:bg-slate-900'
+              }`}
+              title="テキスト選択を維持したままファイルサイズを軽量化するモード"
+            >
+              <Minimize2 className="w-3.5 h-3.5" />
+              <span>軽量化</span>
+            </button>
+          </div>
+        )
       )}
 
       {/* 右側アクションボタン */}

@@ -2,12 +2,21 @@ import React, { useRef, useState, useEffect } from 'react'
 import { RedactRect, PdfPageInfo } from '../utils/mupdfService'
 import {
   AppMode,
+  WorkspaceMode,
   DrawingTool,
   FillMode,
   ArrowHead,
   DrawingItem,
   Point,
   RulerMeasureMode,
+  ReviewComment,
+  ReviewCommentColor,
+  STICKY_NOTE_COLORS,
+  ReviewStamp,
+  ReviewStampType,
+  ReviewTool,
+  ProofreadingMark,
+  ProofreadingMarkType,
 } from '../types/drawing'
 import {
   X,
@@ -21,6 +30,8 @@ import {
   RotateCw,
   Square,
   Type,
+  AlertCircle,
+  MapPin,
 } from 'lucide-react'
 
 // 多角形の面積 (pt^2) を計算 (Shoelace formula)
@@ -225,6 +236,23 @@ interface PdfViewerProps {
   // 物差し・縮尺設定
   rulerScale?: number;
   rulerMeasureMode?: RulerMeasureMode;
+  // 審査・校正設定
+  workspaceMode?: WorkspaceMode;
+  activeReviewTool?: ReviewTool;
+  reviewComments?: ReviewComment[];
+  reviewStamps?: ReviewStamp[];
+  proofreadingMarks?: ProofreadingMark[];
+  selectedReviewCommentId?: string | null;
+  selectedProofreadingMarkId?: string | null;
+  onSelectReviewComment?: (id: string | null) => void;
+  onSelectProofreadingMark?: (id: string | null) => void;
+  onAddReviewComment?: (comment: Omit<ReviewComment, 'id' | 'number' | 'createdAt'>) => void;
+  onUpdateReviewComment?: (id: string, updates: Partial<ReviewComment>) => void;
+  onRemoveReviewComment?: (id: string) => void;
+  onAddReviewStamp?: (stamp: Omit<ReviewStamp, 'id' | 'createdAt'>) => void;
+  onRemoveReviewStamp?: (id: string) => void;
+  onAddProofreadingMark?: (mark: Omit<ProofreadingMark, 'id' | 'createdAt'>) => void;
+  onRemoveProofreadingMark?: (id: string) => void;
   // ハンドラ
   onPageChange?: (newPage: number) => void;
   onZoomChange?: (newZoom: number) => void;
@@ -261,6 +289,22 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
   drawings,
   rulerScale = 100,
   rulerMeasureMode = 'distance',
+  workspaceMode = 'draw',
+  activeReviewTool = 'pin',
+  reviewComments = [],
+  reviewStamps = [],
+  proofreadingMarks = [],
+  selectedReviewCommentId = null,
+  selectedProofreadingMarkId: extSelectedMarkId,
+  onSelectReviewComment,
+  onSelectProofreadingMark,
+  onAddReviewComment,
+  onUpdateReviewComment,
+  onRemoveReviewComment,
+  onAddReviewStamp,
+  onRemoveReviewStamp,
+  onAddProofreadingMark,
+  onRemoveProofreadingMark,
   onPageChange,
   onZoomChange,
   resetViewTrigger,
@@ -291,6 +335,19 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
   const panOffsetStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
   const lastWheelPageChangeRef = useRef<number>(0)
 
+  // 審査・校正モード用状態
+  const [selectedReviewStampId, setSelectedReviewStampId] = useState<string | null>(null)
+  const [localSelectedMarkId, setLocalSelectedMarkId] = useState<string | null>(null)
+  const selectedMarkId = extSelectedMarkId !== undefined ? extSelectedMarkId : localSelectedMarkId
+  const handleSelectMark = (id: string | null) => {
+    setLocalSelectedMarkId(id)
+    onSelectProofreadingMark?.(id)
+  }
+
+  const activeReviewComment = pageInfo
+    ? reviewComments.find((c) => c.id === selectedReviewCommentId && c.pageIndex === pageInfo.index) || null
+    : null
+
   useEffect(() => {
     panOffsetRef.current = panOffset
   }, [panOffset])
@@ -315,6 +372,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     setRulerAreaPoints([])
     setRulerResult(null)
     setSelectedDrawingId(null)
+    setSelectedReviewStampId(null)
     setHoveredDrawingId(null)
     setSnapGuide(null)
   }, [pageInfo?.index])
@@ -1056,14 +1114,32 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
         }
       }
 
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedDrawingId) {
-        // テキスト入力中は除外
-        if (textInput) return
-        e.preventDefault()
-        onRemoveDrawing(selectedDrawingId)
-        setSelectedDrawingId(null)
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        const activeTag = document.activeElement?.tagName?.toLowerCase()
+        if (activeTag === 'input' || activeTag === 'textarea' || textInput) return
+
+        if (selectedDrawingId) {
+          e.preventDefault()
+          onRemoveDrawing(selectedDrawingId)
+          setSelectedDrawingId(null)
+        } else if (selectedMarkId) {
+          e.preventDefault()
+          onRemoveProofreadingMark?.(selectedMarkId)
+          handleSelectMark(null)
+        } else if (selectedReviewStampId) {
+          e.preventDefault()
+          onRemoveReviewStamp?.(selectedReviewStampId)
+          setSelectedReviewStampId(null)
+        } else if (selectedReviewCommentId) {
+          e.preventDefault()
+          onRemoveReviewComment?.(selectedReviewCommentId)
+          onSelectReviewComment?.(null)
+        }
       } else if (e.key === 'Escape') {
         setSelectedDrawingId(null)
+        setSelectedReviewStampId(null)
+        handleSelectMark(null)
+        onSelectReviewComment?.(null)
         setRulerResult(null)
         setSnapGuide(null)
         setRulerAreaPoints([])
@@ -1100,8 +1176,15 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     }
   }, [
     selectedDrawingId,
+    selectedReviewStampId,
+    selectedReviewCommentId,
+    selectedMarkId,
     textInput,
     onRemoveDrawing,
+    onRemoveReviewStamp,
+    onRemoveReviewComment,
+    onRemoveProofreadingMark,
+    onSelectReviewComment,
     appMode,
     activeTool,
     rulerMeasureMode,
@@ -1386,9 +1469,10 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
       target.setPointerCapture(e.pointerId)
     } catch {}
 
-    // パン移動（描画モードの手のひらツール、Spaceキー押下中、中ボタン、右ボタン）の判定
+    // パン移動（描画モードの手のひらツール、審査モードの手のひらツール、Spaceキー押下中、中ボタン、右ボタン）の判定
     const isPanTrigger =
       (appMode === 'draw' && activeTool === 'pan') ||
+      (workspaceMode === 'review' && activeReviewTool === 'pan') ||
       isSpacePressed ||
       e.button === 1 ||
       e.button === 2
@@ -1404,6 +1488,49 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     const rect = target.getBoundingClientRect()
     const relX = (e.clientX - rect.left) / zoom
     const relY = (e.clientY - rect.top) / zoom
+
+    // 🔍 審査・確認モードのクリック・ドラッグ処理
+    if (workspaceMode === 'review') {
+      if (activeReviewTool === 'pin') {
+        const ptX = relX / 1.5
+        const ptY = relY / 1.5
+        onAddReviewComment?.({
+          pageIndex: pageInfo.index,
+          x: ptX,
+          y: ptY,
+          text: '',
+          status: 'unresolved',
+        })
+        return
+      }
+
+      // ドラッグ系のマークアップ（マーカー・取り消し線・下線・囲み枠）
+      if (
+        activeReviewTool === 'highlight' ||
+        activeReviewTool === 'strike' ||
+        activeReviewTool === 'underline' ||
+        activeReviewTool === 'box'
+      ) {
+        isDraggingRef.current = true
+        dragStartRef.current = { x: relX, y: relY }
+        dragCurrentRef.current = { x: relX, y: relY }
+        setDragPreview({
+          startX: relX,
+          startY: relY,
+          currentX: relX,
+          currentY: relY,
+        })
+        return
+      }
+
+      if (activeReviewTool === 'select') {
+        onSelectReviewComment?.(null)
+        setSelectedReviewStampId(null)
+        handleSelectMark(null)
+        return
+      }
+      return
+    }
 
     // 描画モード: 選択移動ツール（オブジェクトをクリックして動かすため、背景ドラッグは行わない）
     if (appMode === 'draw' && activeTool === 'select') {
@@ -1608,6 +1735,78 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     const minY = Math.min(start.y, endY)
     const maxY = Math.max(start.y, endY)
 
+    if (workspaceMode === 'review') {
+      if (activeReviewTool === 'highlight') {
+        if (dx >= 4 || dy >= 4) {
+          const ptX = minX / 1.5
+          const ptY = minY / 1.5
+          const ptW = Math.max(12, dx / 1.5)
+          const ptH = Math.max(14, dy / 1.5)
+          onAddProofreadingMark?.({
+            pageIndex: pageInfo.index,
+            type: 'highlight',
+            x: ptX,
+            y: ptY,
+            w: ptW,
+            h: ptH,
+            color: '#fde047',
+            opacity: 0.38,
+          })
+        }
+        return
+      }
+      if (activeReviewTool === 'strike') {
+        if (dx >= 4 || dy >= 4) {
+          onAddProofreadingMark?.({
+            pageIndex: pageInfo.index,
+            type: 'strike',
+            x: Math.min(start.x, endX) / 1.5,
+            y: Math.min(start.y, endY) / 1.5,
+            points: [
+              { x: start.x / 1.5, y: start.y / 1.5 },
+              { x: endX / 1.5, y: endY / 1.5 },
+            ],
+            color: '#e11d48',
+            strokeWidth: 2.2,
+          })
+        }
+        return
+      }
+      if (activeReviewTool === 'underline') {
+        if (dx >= 4 || dy >= 4) {
+          onAddProofreadingMark?.({
+            pageIndex: pageInfo.index,
+            type: 'underline',
+            x: Math.min(start.x, endX) / 1.5,
+            y: Math.min(start.y, endY) / 1.5,
+            points: [
+              { x: start.x / 1.5, y: start.y / 1.5 },
+              { x: endX / 1.5, y: endY / 1.5 },
+            ],
+            color: '#2563eb',
+            strokeWidth: 2,
+          })
+        }
+        return
+      }
+      if (activeReviewTool === 'box') {
+        if (dx >= 6 || dy >= 6) {
+          onAddProofreadingMark?.({
+            pageIndex: pageInfo.index,
+            type: 'box',
+            x: minX / 1.5,
+            y: minY / 1.5,
+            w: dx / 1.5,
+            h: dy / 1.5,
+            color: '#4f46e5',
+            strokeWidth: 2,
+          })
+        }
+        return
+      }
+      return
+    }
+
     if (appMode === 'eraser') {
       // 消しゴム枠の追加
       onAddRedaction({
@@ -1714,8 +1913,25 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
 
   // カーソルスタイルの判定（スペースキー押下中または描画モードの手のひらツールの時は grab/grabbing）
   const getCursorClass = () => {
-    if (isSpacePressed || (appMode === 'draw' && activeTool === 'pan')) {
+    if (
+      isSpacePressed ||
+      (appMode === 'draw' && activeTool === 'pan') ||
+      (workspaceMode === 'review' && activeReviewTool === 'pan')
+    ) {
       return isPanning ? 'cursor-grabbing' : 'cursor-grab'
+    }
+    if (workspaceMode === 'review') {
+      if (
+        activeReviewTool === 'pin' ||
+        activeReviewTool === 'highlight' ||
+        activeReviewTool === 'strike' ||
+        activeReviewTool === 'underline' ||
+        activeReviewTool === 'box'
+      ) {
+        return 'cursor-crosshair'
+      }
+      if (activeReviewTool === 'select') return 'cursor-default'
+      return 'cursor-pointer'
     }
     if (appMode === 'eraser') return 'cursor-crosshair'
     if (activeTool === 'select') return 'cursor-default'
@@ -1801,6 +2017,16 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
             width={pageInfo.width * 1.5}
             height={pageInfo.height * 1.5}
           >
+            <defs>
+              <linearGradient id="reviewPinGradUnresolved" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stopColor="#f43f5e" />
+                <stop offset="100%" stopColor="#dc2626" />
+              </linearGradient>
+              <linearGradient id="reviewPinGradResolved" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stopColor="#10b981" />
+                <stop offset="100%" stopColor="#059669" />
+              </linearGradient>
+            </defs>
             {/* 確定済み描画アイテム一覧 */}
             {drawings.map((item) => {
               const isHovered = hoveredDrawingId === item.id
@@ -2844,6 +3070,77 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
                 </g>
               )}
 
+            {/* 審査・校正モード: ドラッグ中のマークアッププレビュー */}
+            {dragPreview && workspaceMode === 'review' && (
+              <g>
+                {activeReviewTool === 'highlight' && (() => {
+                  const x = Math.min(dragPreview.startX, dragPreview.currentX)
+                  const y = Math.min(dragPreview.startY, dragPreview.currentY)
+                  const w = Math.max(12, Math.abs(dragPreview.currentX - dragPreview.startX))
+                  const h = Math.max(14, Math.abs(dragPreview.currentY - dragPreview.startY))
+                  return (
+                    <rect
+                      x={x}
+                      y={y}
+                      width={w}
+                      height={h}
+                      rx="2"
+                      fill="#fde047"
+                      fillOpacity="0.38"
+                      stroke="#eab308"
+                      strokeWidth="1"
+                      strokeDasharray="3 2"
+                    />
+                  )
+                })()}
+
+                {activeReviewTool === 'strike' && (
+                  <line
+                    x1={dragPreview.startX}
+                    y1={dragPreview.startY}
+                    x2={dragPreview.currentX}
+                    y2={dragPreview.currentY}
+                    stroke="#e11d48"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                  />
+                )}
+
+                {activeReviewTool === 'underline' && (
+                  <line
+                    x1={dragPreview.startX}
+                    y1={dragPreview.startY}
+                    x2={dragPreview.currentX}
+                    y2={dragPreview.currentY}
+                    stroke="#2563eb"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                  />
+                )}
+
+                {activeReviewTool === 'box' && (() => {
+                  const x = Math.min(dragPreview.startX, dragPreview.currentX)
+                  const y = Math.min(dragPreview.startY, dragPreview.currentY)
+                  const w = Math.abs(dragPreview.currentX - dragPreview.startX)
+                  const h = Math.abs(dragPreview.currentY - dragPreview.startY)
+                  return (
+                    <rect
+                      x={x}
+                      y={y}
+                      width={w}
+                      height={h}
+                      rx="4"
+                      fill="#4f46e5"
+                      fillOpacity="0.08"
+                      stroke="#4f46e5"
+                      strokeWidth="2"
+                      strokeDasharray="4 2"
+                    />
+                  )
+                })()}
+              </g>
+            )}
+
             {/* ドラッグ中のプレビュー描画（矢印、直線、矩形、丸、物差し） */}
             {dragPreview && appMode === 'draw' && (
               <g style={{ color: drawColor }}>
@@ -3123,6 +3420,487 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
                 </g>
               </g>
             )}
+
+            {/* 審査スタンプ一覧 */}
+            {reviewStamps
+              .filter((stamp) => stamp.pageIndex === pageInfo.index)
+              .map((stamp) => {
+                const isSelected = selectedReviewStampId === stamp.id
+                const sx = stamp.x * 1.5
+                const sy = stamp.y * 1.5
+                const sw = stamp.w * 1.5
+                const sh = stamp.h * 1.5
+
+                return (
+                  <g
+                    key={stamp.id}
+                    transform={`translate(${sx}, ${sy})`}
+                    className="pointer-events-auto cursor-pointer select-none"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setSelectedReviewStampId(stamp.id)
+                      onSelectReviewComment?.(null)
+                    }}
+                  >
+                    {/* レ点スタンプ */}
+                    {stamp.type === 'check_mark' && (
+                      <path
+                        d={`M ${sw * 0.15} ${sh * 0.52} L ${sw * 0.42} ${sh * 0.85} L ${sw * 0.88} ${sh * 0.16}`}
+                        fill="none"
+                        stroke="#dc2626"
+                        strokeWidth={Math.max(3.5, sw * 0.14)}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    )}
+
+                    {/* 確認済スタンプ */}
+                    {stamp.type === 'checked' && (
+                      <g>
+                        <rect
+                          x="0"
+                          y="0"
+                          width={sw}
+                          height={sh}
+                          rx="6"
+                          fill="#fef2f2"
+                          fillOpacity="0.88"
+                          stroke="#dc2626"
+                          strokeWidth="2.5"
+                        />
+                        <rect
+                          x="3"
+                          y="3"
+                          width={sw - 6}
+                          height={sh - 6}
+                          rx="4"
+                          fill="none"
+                          stroke="#dc2626"
+                          strokeWidth="1"
+                        />
+                        <text
+                          x={sw / 2}
+                          y={sh * 0.36}
+                          fill="#dc2626"
+                          fontSize={Math.max(7.5, sh * 0.22)}
+                          fontWeight="bold"
+                          textAnchor="middle"
+                          fontFamily="sans-serif"
+                          letterSpacing="0.06em"
+                        >
+                          CONFIRMED
+                        </text>
+                        <text
+                          x={sw / 2}
+                          y={sh * 0.8}
+                          fill="#dc2626"
+                          fontSize={Math.max(12, sh * 0.42)}
+                          fontWeight="900"
+                          textAnchor="middle"
+                          fontFamily="sans-serif"
+                          letterSpacing="0.1em"
+                        >
+                          確 認 済
+                        </text>
+                      </g>
+                    )}
+
+                    {/* 合致スタンプ */}
+                    {stamp.type === 'match' && (
+                      <g>
+                        <rect
+                          x="0"
+                          y="0"
+                          width={sw}
+                          height={sh}
+                          rx="6"
+                          fill="#ecfdf5"
+                          fillOpacity="0.88"
+                          stroke="#059669"
+                          strokeWidth="2.5"
+                        />
+                        <rect
+                          x="3"
+                          y="3"
+                          width={sw - 6}
+                          height={sh - 6}
+                          rx="4"
+                          fill="none"
+                          stroke="#059669"
+                          strokeWidth="1"
+                        />
+                        <text
+                          x={sw / 2}
+                          y={sh * 0.36}
+                          fill="#059669"
+                          fontSize={Math.max(7.5, sh * 0.22)}
+                          fontWeight="bold"
+                          textAnchor="middle"
+                          fontFamily="sans-serif"
+                          letterSpacing="0.06em"
+                        >
+                          MATCHED
+                        </text>
+                        <text
+                          x={sw / 2}
+                          y={sh * 0.8}
+                          fill="#059669"
+                          fontSize={Math.max(12, sh * 0.42)}
+                          fontWeight="900"
+                          textAnchor="middle"
+                          fontFamily="sans-serif"
+                          letterSpacing="0.12em"
+                        >
+                          合　致
+                        </text>
+                      </g>
+                    )}
+
+                    {/* 要確認スタンプ */}
+                    {stamp.type === 'need_check' && (
+                      <g>
+                        <rect
+                          x="0"
+                          y="0"
+                          width={sw}
+                          height={sh}
+                          rx="6"
+                          fill="#fffbeb"
+                          fillOpacity="0.88"
+                          stroke="#d97706"
+                          strokeWidth="2.5"
+                          strokeDasharray="4 2"
+                        />
+                        <rect
+                          x="3"
+                          y="3"
+                          width={sw - 6}
+                          height={sh - 6}
+                          rx="4"
+                          fill="none"
+                          stroke="#d97706"
+                          strokeWidth="1"
+                        />
+                        <text
+                          x={sw / 2}
+                          y={sh * 0.36}
+                          fill="#d97706"
+                          fontSize={Math.max(7.5, sh * 0.22)}
+                          fontWeight="bold"
+                          textAnchor="middle"
+                          fontFamily="sans-serif"
+                          letterSpacing="0.06em"
+                        >
+                          ATTENTION
+                        </text>
+                        <text
+                          x={sw / 2}
+                          y={sh * 0.8}
+                          fill="#d97706"
+                          fontSize={Math.max(12, sh * 0.42)}
+                          fontWeight="900"
+                          textAnchor="middle"
+                          fontFamily="sans-serif"
+                          letterSpacing="0.08em"
+                        >
+                          要 確 認
+                        </text>
+                      </g>
+                    )}
+
+                    {/* 不適合スタンプ */}
+                    {stamp.type === 'reject' && (
+                      <g>
+                        <rect
+                          x="0"
+                          y="0"
+                          width={sw}
+                          height={sh}
+                          rx="4"
+                          fill="#fff1f2"
+                          fillOpacity="0.9"
+                          stroke="#e11d48"
+                          strokeWidth="3"
+                        />
+                        <text
+                          x={sw / 2}
+                          y={sh * 0.36}
+                          fill="#e11d48"
+                          fontSize={Math.max(7.5, sh * 0.22)}
+                          fontWeight="bold"
+                          textAnchor="middle"
+                          fontFamily="sans-serif"
+                          letterSpacing="0.06em"
+                        >
+                          REJECTED
+                        </text>
+                        <text
+                          x={sw / 2}
+                          y={sh * 0.8}
+                          fill="#e11d48"
+                          fontSize={Math.max(12, sh * 0.42)}
+                          fontWeight="900"
+                          textAnchor="middle"
+                          fontFamily="sans-serif"
+                          letterSpacing="0.08em"
+                        >
+                          不 適 合
+                        </text>
+                      </g>
+                    )}
+
+                    {/* 選択中ハイライト枠 ＆ 削除アイコン */}
+                    {isSelected && (
+                      <g>
+                        <rect
+                          x="-4"
+                          y="-4"
+                          width={sw + 8}
+                          height={sh + 8}
+                          rx="8"
+                          fill="none"
+                          stroke="#06b6d4"
+                          strokeWidth="2"
+                          strokeDasharray="4 3"
+                        />
+                        <g
+                          transform={`translate(${sw + 8}, -6)`}
+                          className="cursor-pointer"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onRemoveReviewStamp?.(stamp.id)
+                            setSelectedReviewStampId(null)
+                          }}
+                        >
+                          <circle r="9" fill="#ef4444" stroke="#ffffff" strokeWidth="1.5" />
+                          <line x1="-4" y1="-4" x2="4" y2="4" stroke="#ffffff" strokeWidth="1.8" strokeLinecap="round" />
+                          <line x1="4" y1="-4" x2="-4" y2="4" stroke="#ffffff" strokeWidth="1.8" strokeLinecap="round" />
+                        </g>
+                      </g>
+                    )}
+                  </g>
+                )
+              })}
+
+            {/* 審査・校正記号一覧 */}
+            {proofreadingMarks
+              .filter((mark) => mark.pageIndex === pageInfo.index)
+              .map((mark) => {
+                const isSelected = selectedMarkId === mark.id
+                const sx = (mark.x || 0) * 1.5
+                const sy = (mark.y || 0) * 1.5
+                const sw = (mark.w || 0) * 1.5
+                const sh = (mark.h || 0) * 1.5
+                const markColor = mark.color || '#e11d48'
+                const strokeW = (mark.strokeWidth || 2) * 1.2
+
+                return (
+                  <g
+                    key={mark.id}
+                    className="pointer-events-auto cursor-pointer select-none group"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      handleSelectMark(mark.id)
+                      onSelectReviewComment?.(null)
+                      setSelectedReviewStampId(null)
+                    }}
+                  >
+                    {/* 🖍️ マーカー (半透明蛍光ペン) */}
+                    {mark.type === 'highlight' && (
+                      <rect
+                        x={sx}
+                        y={sy}
+                        width={sw}
+                        height={sh}
+                        rx="2"
+                        fill={mark.color || '#fde047'}
+                        fillOpacity={mark.opacity || 0.38}
+                        style={{ mixBlendMode: 'multiply' }}
+                      />
+                    )}
+
+                    {/* ̶S̶ 取り消し線 */}
+                    {mark.type === 'strike' && mark.points && mark.points.length >= 2 && (
+                      <line
+                        x1={mark.points[0].x * 1.5}
+                        y1={mark.points[0].y * 1.5}
+                        x2={mark.points[1].x * 1.5}
+                        y2={mark.points[1].y * 1.5}
+                        stroke={mark.color || '#e11d48'}
+                        strokeWidth={(mark.strokeWidth || 2) * 1.2}
+                        strokeLinecap="round"
+                      />
+                    )}
+
+                    {/* <u>U</u> 下線 */}
+                    {mark.type === 'underline' && mark.points && mark.points.length >= 2 && (
+                      <line
+                        x1={mark.points[0].x * 1.5}
+                        y1={mark.points[0].y * 1.5}
+                        x2={mark.points[1].x * 1.5}
+                        y2={mark.points[1].y * 1.5}
+                        stroke={mark.color || '#2563eb'}
+                        strokeWidth={(mark.strokeWidth || 2) * 1.2}
+                        strokeLinecap="round"
+                      />
+                    )}
+
+                    {/* ▢ 囲み枠 */}
+                    {mark.type === 'box' && (
+                      <rect
+                        x={sx}
+                        y={sy}
+                        width={sw}
+                        height={sh}
+                        rx="4"
+                        fill={mark.color || '#4f46e5'}
+                        fillOpacity="0.06"
+                        stroke={mark.color || '#4f46e5'}
+                        strokeWidth={(mark.strokeWidth || 2) * 1.2}
+                      />
+                    )}
+
+                    {/* 選択中枠 ＆ 削除 × ボタン */}
+                    {isSelected && (() => {
+                      const bboxX = (mark.type === 'highlight' || mark.type === 'box')
+                        ? sx
+                        : (mark.points ? Math.min(mark.points[0].x, mark.points[1].x) * 1.5 : sx)
+                      const bboxY = (mark.type === 'highlight' || mark.type === 'box')
+                        ? sy
+                        : (mark.points ? Math.min(mark.points[0].y, mark.points[1].y) * 1.5 : sy)
+                      const bboxW = (mark.type === 'highlight' || mark.type === 'box')
+                        ? sw
+                        : (mark.points ? Math.abs(mark.points[1].x - mark.points[0].x) * 1.5 : 32)
+                      const bboxH = (mark.type === 'highlight' || mark.type === 'box')
+                        ? sh
+                        : (mark.points ? Math.abs(mark.points[1].y - mark.points[0].y) * 1.5 : 20)
+                      return (
+                        <g>
+                          <rect
+                            x={bboxX - 4}
+                            y={bboxY - 4}
+                            width={Math.max(24, bboxW + 8)}
+                            height={Math.max(16, bboxH + 8)}
+                            rx="3"
+                            fill="none"
+                            stroke="#06b6d4"
+                            strokeWidth="1.8"
+                            strokeDasharray="3 2"
+                          />
+                          <g
+                            transform={`translate(${bboxX + Math.max(24, bboxW + 8) - 2}, ${bboxY - 2})`}
+                            className="cursor-pointer"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              onRemoveProofreadingMark?.(mark.id)
+                              handleSelectMark(null)
+                            }}
+                          >
+                            <circle r="8" fill="#ef4444" stroke="#ffffff" strokeWidth="1.5" />
+                            <line x1="-3.5" y1="-3.5" x2="3.5" y2="3.5" stroke="#ffffff" strokeWidth="1.6" strokeLinecap="round" />
+                            <line x1="3.5" y1="-3.5" x2="-3.5" y2="3.5" stroke="#ffffff" strokeWidth="1.6" strokeLinecap="round" />
+                          </g>
+                        </g>
+                      )
+                    })()}
+                  </g>
+                )
+              })}
+
+            {/* 指摘付箋ピン一覧 */}
+            {reviewComments
+              .filter((comment) => comment.pageIndex === pageInfo.index)
+              .map((comment) => {
+                const isSelected = selectedReviewCommentId === comment.id
+                const isUnresolved = comment.status === 'unresolved'
+                const noteColor: ReviewCommentColor = comment.color || 'yellow'
+                const styleDef = STICKY_NOTE_COLORS[noteColor]
+                const cx = comment.x * 1.5
+                const cy = comment.y * 1.5
+                const pinR = 14
+
+                return (
+                  <g
+                    key={comment.id}
+                    transform={`translate(${cx}, ${cy})`}
+                    className="pointer-events-auto cursor-pointer select-none group"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onSelectReviewComment?.(comment.id)
+                      setSelectedReviewStampId(null)
+                    }}
+                  >
+                    {/* 未解決時のパルスリング（付箋色） */}
+                    {isUnresolved && (
+                      <circle
+                        cx="0"
+                        cy="0"
+                        r={pinR + 5}
+                        fill="none"
+                        stroke={styleDef.hexDot}
+                        strokeWidth="2.5"
+                        opacity="0.6"
+                        className="animate-ping"
+                      />
+                    )}
+
+                    {/* 選択中ハイライトリング */}
+                    {isSelected && (
+                      <circle
+                        cx="0"
+                        cy="0"
+                        r={pinR + 6}
+                        fill="none"
+                        stroke="#0ea5e9"
+                        strokeWidth="3"
+                        strokeDasharray="3 2"
+                      />
+                    )}
+
+                    {/* 影 */}
+                    <ellipse
+                      cx="2"
+                      cy={pinR + 3}
+                      rx={pinR * 0.7}
+                      ry="3"
+                      fill="rgba(0,0,0,0.3)"
+                    />
+
+                    {/* 付箋ピン本体（パステル調背景 ＋ 枠線） */}
+                    <circle
+                      cx="0"
+                      cy="0"
+                      r={pinR}
+                      fill={styleDef.hexBg}
+                      stroke={styleDef.hexBorder}
+                      strokeWidth="2.5"
+                      className="shadow-md transition-transform group-hover:scale-110"
+                    />
+
+                    {/* ピン通し番号（付箋テキスト色） */}
+                    <text
+                      x="0"
+                      y="4"
+                      fill={styleDef.hexText}
+                      fontSize="11"
+                      fontWeight="900"
+                      textAnchor="middle"
+                      fontFamily="ui-sans-serif, system-ui, sans-serif"
+                      className="select-none pointer-events-none"
+                    >
+                      {comment.number}
+                    </text>
+
+                    {/* 解決済の場合は右上に小さな緑チェックバッジ */}
+                    {!isUnresolved && (
+                      <g transform={`translate(${pinR - 3}, -${pinR - 3})`}>
+                        <circle r="6" fill="#10b981" stroke="#ffffff" strokeWidth="1.5" />
+                        <path d="M -3 0 L -1 2 L 3 -2" fill="none" stroke="#ffffff" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                      </g>
+                    )}
+                  </g>
+                )
+              })}
           </svg>
 
           {/* ドラッグ操作専用オーバーレイ (PointerCapture) */}
@@ -3144,8 +3922,22 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
             }}
             className={`absolute inset-0 select-none z-10 ${getCursorClass()}`}
             title={
-              isSpacePressed || (appMode === 'draw' && activeTool === 'pan')
+              isSpacePressed || (appMode === 'draw' && activeTool === 'pan') || (workspaceMode === 'review' && activeReviewTool === 'pan')
                 ? 'ドラッグして用紙を自由に移動（スクロール）'
+                : workspaceMode === 'review'
+                ? activeReviewTool === 'pin'
+                  ? 'クリックして指摘付箋を配置（メモを入力できます）'
+                  : activeReviewTool === 'highlight'
+                  ? 'ドラッグして半透明の蛍光マーカーを引く'
+                  : activeReviewTool === 'strike'
+                  ? 'ドラッグして文字に取り消し線を引く'
+                  : activeReviewTool === 'underline'
+                  ? 'ドラッグして文字に下線を引く'
+                  : activeReviewTool === 'box'
+                  ? 'ドラッグして四角い枠で囲む'
+                  : activeReviewTool === 'select'
+                  ? 'マークアップや付箋をクリックして選択・削除'
+                  : 'クリックして配置'
                 : appMode === 'eraser'
                 ? 'マウスドラッグで消去したい範囲を囲んでください'
                 : activeTool === 'select'
@@ -3264,6 +4056,150 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
                   >
                     <X className="w-4 h-4" />
                   </button>
+                </div>
+              </div>
+            )
+          })()}
+
+          {/* 🔍 指摘付箋 (Sticky Note) インライン編集ポップオーバー */}
+          {activeReviewComment && (() => {
+            const currentColor: ReviewCommentColor = activeReviewComment.color || 'yellow'
+            const currentStyle = STICKY_NOTE_COLORS[currentColor]
+            const isResolved = activeReviewComment.status === 'resolved'
+
+            return (
+              <div
+                style={{
+                  left: `${Math.min(pageInfo.width * 1.5 - 340, Math.max(10, activeReviewComment.x * 1.5 + 20))}px`,
+                  top: `${Math.min(pageInfo.height * 1.5 - 220, Math.max(12, activeReviewComment.y * 1.5 - 24))}px`,
+                  backgroundColor: currentStyle.hexBg,
+                  borderColor: currentStyle.hexBorder,
+                }}
+                onClick={(e) => e.stopPropagation()}
+                className={`absolute z-30 border-2 rounded-xl shadow-2xl p-3.5 w-84 animate-fade-in flex flex-col gap-2.5 transition-all duration-200 ring-1 ring-black/5 ${
+                  isResolved ? 'opacity-90' : 'opacity-100'
+                }`}
+              >
+                {/* 付箋の糊代・半透明テープ風アクセント */}
+                <div
+                  className="w-16 h-3 bg-white/70 backdrop-blur-xs rounded-xs -top-1.5 left-1/2 -translate-x-1/2 absolute border border-white/80 shadow-2xs pointer-events-none"
+                />
+
+                {/* ヘッダー: 番号 ＆ カラーパレット ＆ ステータス ＆ 操作 */}
+                <div
+                  className="flex items-center justify-between border-b pb-2 pt-0.5"
+                  style={{ borderColor: `${currentStyle.hexBorder}90` }}
+                >
+                  {/* 付箋番号バッジ */}
+                  <div className="flex items-center gap-1.5">
+                    <span
+                      className="w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-black text-white shadow-2xs"
+                      style={{ backgroundColor: currentStyle.hexDot }}
+                    >
+                      {activeReviewComment.number}
+                    </span>
+                    <span
+                      className="text-xs font-bold font-mono"
+                      style={{ color: currentStyle.hexText }}
+                    >
+                      付箋 #{activeReviewComment.number}
+                    </span>
+                  </div>
+
+                  {/* 🎨 淡いカラーパレットセレクター */}
+                  <div className="flex items-center gap-1 bg-white/70 px-2 py-0.5 rounded-full border border-black/5 shadow-2xs">
+                    {(['yellow', 'pink', 'blue', 'green', 'purple', 'orange'] as ReviewCommentColor[]).map((c) => {
+                      const def = STICKY_NOTE_COLORS[c]
+                      const isCurrent = currentColor === c
+                      return (
+                        <button
+                          key={c}
+                          type="button"
+                          onClick={() => onUpdateReviewComment?.(activeReviewComment.id, { color: c })}
+                          className={`w-3.5 h-3.5 rounded-full transition-transform cursor-pointer ${
+                            isCurrent
+                              ? 'scale-130 ring-2 ring-slate-800 shadow-2xs'
+                              : 'hover:scale-120 opacity-60 hover:opacity-100'
+                          }`}
+                          style={{ backgroundColor: def.hexDot }}
+                          title={`付箋色を「${def.name}」に変更`}
+                        />
+                      )
+                    })}
+                  </div>
+
+                  {/* 右側アクション（未解決/解決済 ＆ 削除 ＆ 閉じる） */}
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onUpdateReviewComment?.(activeReviewComment.id, {
+                          status: isResolved ? 'unresolved' : 'resolved',
+                        })
+                      }}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 transition cursor-pointer shadow-2xs ${
+                        !isResolved
+                          ? 'bg-rose-500/15 text-rose-800 hover:bg-rose-500/25 border border-rose-300'
+                          : 'bg-emerald-600 text-white hover:bg-emerald-700'
+                      }`}
+                      title={!isResolved ? '解決済みにする' : '未解決に戻す'}
+                    >
+                      {!isResolved ? (
+                        <>
+                          <AlertCircle className="w-3 h-3 text-rose-600" />
+                          <span>未解決</span>
+                        </>
+                      ) : (
+                        <>
+                          <Check className="w-3 h-3 text-white" />
+                          <span>解決済</span>
+                        </>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onRemoveReviewComment?.(activeReviewComment.id)
+                        onSelectReviewComment?.(null)
+                      }}
+                      className="p-1 rounded text-slate-500 hover:text-rose-600 hover:bg-black/5 transition cursor-pointer"
+                      title="この付箋を削除"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => onSelectReviewComment?.(null)}
+                      className="p-1 rounded text-slate-500 hover:text-slate-800 hover:bg-black/5 transition cursor-pointer"
+                      title="閉じる"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* メモ入力テキストエリア（付箋用紙に直筆する自然な質感） */}
+                <div className="relative">
+                  <textarea
+                    autoFocus
+                    rows={3}
+                    value={activeReviewComment.text}
+                    onChange={(e) =>
+                      onUpdateReviewComment?.(activeReviewComment.id, { text: e.target.value })
+                    }
+                    placeholder="付箋に指摘事項や確認メモを入力..."
+                    style={{ color: currentStyle.hexText }}
+                    className="w-full bg-transparent border-0 p-1 text-xs placeholder-slate-400 focus:outline-none focus:ring-0 resize-none font-sans font-medium leading-relaxed"
+                  />
+
+                  {/* 解決済みの朱色透かしスタンプ */}
+                  {isResolved && (
+                    <div className="absolute right-1 bottom-1 pointer-events-none select-none border-2 border-emerald-600 text-emerald-700 px-2 py-0.5 rounded text-[11px] font-black rotate-[-10deg] opacity-70 tracking-wider bg-emerald-50/80">
+                      ✓ 解決済
+                    </div>
+                  )}
                 </div>
               </div>
             )

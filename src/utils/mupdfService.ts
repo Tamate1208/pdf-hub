@@ -1,8 +1,11 @@
 import { GZIPPED_MUPDF_WASM_BASE64 } from './wasmBinary';
+import { GZIPPED_DEFAULT_MINCHO_FONT_BASE64 } from './defaultFontBinary';
 import { DrawingItem, BookmarkItem } from '../types/drawing';
 
 let mupdfModule: any = null;
 let initPromise: Promise<any> | null = null;
+let defaultMinchoFontInstance: any = null;
+let customGothicFontInstance: any = null;
 
 // Base64からGzipを解凍してUint8Arrayに復元
 async function decompressGzipBase64(base64: string): Promise<Uint8Array> {
@@ -39,8 +42,11 @@ export async function getMuPdf() {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
-    // 1. Wasm バイナリの展開
-    const wasmBytes = await decompressGzipBase64(GZIPPED_MUPDF_WASM_BASE64);
+    // 1. Wasm バイナリと高品質明朝体フォントバイナリの並行展開
+    const [wasmBytes, fontBytes] = await Promise.all([
+      decompressGzipBase64(GZIPPED_MUPDF_WASM_BASE64),
+      decompressGzipBase64(GZIPPED_DEFAULT_MINCHO_FONT_BASE64)
+    ]);
 
     // 2. MuPDF の初期化モジュールに渡す
     (globalThis as any).$libmupdf_wasm_Module = {
@@ -49,11 +55,58 @@ export async function getMuPdf() {
 
     // 3. mupdf のロード
     const m = await import('mupdf');
+
+    // 4. 高品質明朝体フォント（Morisawa BIZ UD Mincho）の初期化
+    try {
+      defaultMinchoFontInstance = new m.Font('BIZ-UDMincho', fontBytes);
+    } catch (e) {
+      console.warn('Failed to initialize default mincho font:', e);
+    }
+
+    // 5. MuPDF 外部フォント供給フックの登録（非埋め込みフォントの完全再現）
+    m.installLoadFontFunction((name: string, script: string, _bold: boolean, _italic: boolean) => {
+      // 明朝体・セリフ体・日本語標準フォントの判定
+      const isMincho = /mincho|明朝|serif|ryumin|shomincho|song/i.test(name) ||
+        (script === 'JP' && !/gothic|ゴシック|sans|kaku/i.test(name));
+
+      if (isMincho && defaultMinchoFontInstance) {
+        return defaultMinchoFontInstance;
+      }
+
+      // ゴシック体のカスタム供給（もしローカルフォント等で登録されている場合）
+      const isGothic = /gothic|ゴシック|sans|kaku/i.test(name);
+      if (isGothic && customGothicFontInstance) {
+        return customGothicFontInstance;
+      }
+
+      // 未該当時のデフォルトフォールバック
+      return null;
+    });
+
     mupdfModule = m;
     return m;
   })();
 
   return initPromise;
+}
+
+/**
+ * 外部（Local Font Access API やユーザー設定等）から追加フォントを動的に供給するインターフェース
+ */
+export async function registerCustomFont(type: 'mincho' | 'gothic', fontBuffer: ArrayBuffer) {
+  const m = await getMuPdf();
+  try {
+    const font = new m.Font(`Custom-${type}`, new Uint8Array(fontBuffer));
+    if (type === 'mincho') {
+      defaultMinchoFontInstance = font;
+    } else if (type === 'gothic') {
+      customGothicFontInstance = font;
+    }
+    return true;
+  } catch (e) {
+    console.error('Failed to register custom font:', e);
+    return false;
+  }
 }
 
 export interface RedactRect {

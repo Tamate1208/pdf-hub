@@ -147,6 +147,19 @@ export const DeskSidebar: React.FC<DeskSidebarProps> = ({
   const [selectedSourceIds, setSelectedSourceIds] = useState<Set<string>>(new Set())
   const [selectedTargetIds, setSelectedTargetIds] = useState<Set<string>>(new Set())
 
+  // アイテムが空になった際や変更時に選択状態をクリーンアップ
+  useEffect(() => {
+    if (items.length === 0 && selectedTargetIds.size > 0) {
+      setSelectedTargetIds(new Set())
+    }
+  }, [items.length])
+
+  useEffect(() => {
+    if (sourceItemsToUse.length === 0 && selectedSourceIds.size > 0) {
+      setSelectedSourceIds(new Set())
+    }
+  }, [sourceItemsToUse.length])
+
   // 左右ペインの幅比率（％）: 初期値50%、localStorage に保存
   const [splitRatio, setSplitRatio] = useState<number>(() => {
     const saved = localStorage.getItem('giov_desk_split_ratio')
