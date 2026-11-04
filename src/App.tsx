@@ -9,6 +9,7 @@ import { ReviewSidebar } from './components/ReviewSidebar'
 import { DeskDoc, DeskItem } from './types/desk'
 import { createDeskItemsFromPdfFile, buildMergedPdfFromDesk } from './utils/deskService'
 import {
+  getMuPdf,
   getPdfInfo,
   renderPageImage,
   searchPageKeyword,
@@ -158,6 +159,18 @@ export default function App() {
 
   // 作業机の state (初期状態は閉じた状態 false: これまでの通常使用を完全維持)
   const [isDeskOpen, setIsDeskOpen] = useState<boolean>(false)
+
+  // 🚀 Web配信最適化: アイドル時間を利用したWASMとフォントの先行プリロード（初回ファイル投入時の体感ラグをゼロ化）
+  useEffect(() => {
+    const preload = () => {
+      getMuPdf().catch(() => {})
+    }
+    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+      ;(window as any).requestIdleCallback(preload, { timeout: 2500 })
+    } else {
+      setTimeout(preload, 1000)
+    }
+  }, [])
   // deskSourceItems: 左ペイン（素材プール: 読み込んだ全PDFファイルとその全ページ）
   const [deskSourceItems, setDeskSourceItems] = useState<DeskItem[]>([])
   // deskItems: 右ペイン（編纂ワークスペース: 抽出・結合対象のページ群）

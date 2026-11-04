@@ -1,0 +1,1 @@
+export{t as GZIPPED_DEFAULT_MINCHO_FONT_BASE64}from"./font-binary-BxMBL1RY.js";

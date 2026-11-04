@@ -1,0 +1,1 @@
+export{t as GZIPPED_MUPDF_WASM_BASE64}from"./wasm-binary-BxCppWjf.js";

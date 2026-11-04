@@ -1,5 +1,3 @@
-import { GZIPPED_MUPDF_WASM_BASE64 } from './wasmBinary';
-import { GZIPPED_DEFAULT_MINCHO_FONT_BASE64 } from './defaultFontBinary';
 import { DrawingItem, BookmarkItem } from '../types/drawing';
 
 let mupdfModule: any = null;
@@ -42,15 +40,28 @@ export async function getMuPdf() {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
-    // 1. Wasm バイナリと高品質明朝体フォントバイナリの並行展開
-    const [wasmBytes, fontBytes] = await Promise.all([
-      decompressGzipBase64(GZIPPED_MUPDF_WASM_BASE64),
-      decompressGzipBase64(GZIPPED_DEFAULT_MINCHO_FONT_BASE64)
+    // 1. Wasm バイナリと高品質明朝体フォントバイナリの動的オンデマンド並行ロード（メインバンドルの超軽量化）
+    const [wasmMod, fontMod] = await Promise.all([
+      import('./wasmBinary'),
+      import('./defaultFontBinary')
     ]);
 
-    // 2. MuPDF の初期化モジュールに渡す
+    const [wasmBytes, fontBytes] = await Promise.all([
+      decompressGzipBase64(wasmMod.GZIPPED_MUPDF_WASM_BASE64),
+      decompressGzipBase64(fontMod.GZIPPED_DEFAULT_MINCHO_FONT_BASE64)
+    ]);
+
+    // 2. MuPDF の初期化モジュールに渡す（fetchを完全防止しインメモリから直接WebAssemblyインスタンス化）
     (globalThis as any).$libmupdf_wasm_Module = {
       wasmBinary: wasmBytes.buffer,
+      instantiateWasm(imports: any, successCallback: (instance: any, module: any) => void) {
+        WebAssembly.instantiate(wasmBytes.buffer, imports).then((output: any) => {
+          successCallback(output.instance, output.module)
+        }).catch((err) => {
+          console.error('Failed to instantiate wasm:', err)
+        })
+        return {}
+      }
     };
 
     // 3. mupdf のロード

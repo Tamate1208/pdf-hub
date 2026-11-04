@@ -17,7 +17,7 @@ function stripDuplicateMupdfWasm(): Plugin {
         return {
           code: code.replace(
             /new URL\(["']mupdf-wasm\.wasm["'],\s*import\.meta\.url\)\.href/g,
-            '""'
+            '"data:application/wasm;base64,"'
           ),
           map: null,
         }
@@ -27,19 +27,35 @@ function stripDuplicateMupdfWasm(): Plugin {
   }
 }
 
+const isSingleFile = process.env.BUILD_MODE === 'single'
+
 export default defineConfig({
   plugins: [
     stripDuplicateMupdfWasm(),
     react(),
     tailwindcss(),
-    viteSingleFile({
-      useRecommendedBuildConfig: true,
-      removeViteModuleLoader: true
-    })
+    ...(isSingleFile
+      ? [
+          viteSingleFile({
+            useRecommendedBuildConfig: true,
+            removeViteModuleLoader: true,
+          }),
+        ]
+      : []),
   ],
   build: {
     target: 'esnext',
-    assetsInlineLimit: 100000000, // 100MBまでインライン化
-    chunkSizeWarningLimit: 50000
-  }
+    assetsInlineLimit: isSingleFile ? 100000000 : 4096,
+    chunkSizeWarningLimit: 50000,
+    rollupOptions: isSingleFile
+      ? {}
+      : {
+          output: {
+            manualChunks(id) {
+              if (id.includes('wasmBinary')) return 'wasm-binary'
+              if (id.includes('defaultFontBinary')) return 'font-binary'
+            },
+          },
+        },
+  },
 })

@@ -7,7 +7,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build && cp dist/index.html GioV_PDF_Hub.html && (cp dist/index.html ../GioV_PDF_Hub.html 2>/dev/null || true)",
+    "build": "tsc -b && BUILD_MODE=single vite build && cp dist/index.html GioV_PDF_Hub.html && (cp dist/index.html ../GioV_PDF_Hub.html 2>/dev/null || true) && vite build",
+    "build:web": "tsc -b && vite build",
+    "build:single": "tsc -b && BUILD_MODE=single vite build && cp dist/index.html GioV_PDF_Hub.html && (cp dist/index.html ../GioV_PDF_Hub.html 2>/dev/null || true)",
     "preview": "vite preview"
   },
   "dependencies": {
