@@ -27,6 +27,7 @@ import {
   RotateCw,
   Layers,
   CopyPlus,
+  Spline,
 } from 'lucide-react'
 import { AppMode, WorkspaceMode, DrawingTool, FillMode, ArrowHead, RulerMeasureMode } from '../types/drawing'
 
@@ -545,6 +546,18 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             >
               <Minus className="w-3.5 h-3.5" />
               直線
+            </button>
+            <button
+              onClick={() => onToolChange('polyline')}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-md font-medium transition cursor-pointer ${
+                activeTool === 'polyline'
+                  ? 'bg-blue-600 text-white shadow-sm font-bold'
+                  : 'text-slate-300 hover:text-white'
+              }`}
+              title="連続線（折れ線・クリックで頂点追加・ダブルクリックまたはEnterで確定）"
+            >
+              <Spline className="w-3.5 h-3.5" />
+              連続線
             </button>
             <button
               onClick={() => onToolChange('rect')}

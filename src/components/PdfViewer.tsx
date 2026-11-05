@@ -437,6 +437,12 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
       setRulerResult(null)
       setRulerAreaPoints([])
     }
+    if (activeTool !== 'polygon') {
+      setPolygonPoints([])
+    }
+    if (activeTool !== 'polyline') {
+      setPolylinePoints([])
+    }
   }, [activeTool])
 
   // 物差しの面積計測用多角形頂点リスト
@@ -444,6 +450,8 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
 
   // 多角形描画用の頂点リスト
   const [polygonPoints, setPolygonPoints] = useState<Point[]>([])
+  // 連続線描画用の頂点リスト
+  const [polylinePoints, setPolylinePoints] = useState<Point[]>([])
   const [mousePos, setMousePos] = useState<Point | null>(null)
 
   // テキスト入力ポップアップ用の state
@@ -639,6 +647,38 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
         areaMm2,
         realAreaStr,
         realPerimeterStr,
+        center: { x: centerPt.x * 1.5, y: centerPt.y * 1.5 },
+      })
+      return
+    }
+
+    // 5. 連続線: 全セグメントの合計延長（総延長）を計測
+    if (item.tool === 'polyline') {
+      if (!item.points || item.points.length < 2) return
+      const ptsInPt = item.points
+      let totalLengthPt = 0
+      for (let i = 0; i < ptsInPt.length - 1; i++) {
+        totalLengthPt += Math.hypot(ptsInPt[i + 1].x - ptsInPt[i].x, ptsInPt[i + 1].y - ptsInPt[i].y)
+      }
+      const totalMm = totalLengthPt * (25.4 / 72)
+      const realMm = totalMm * rulerScale
+      const realDistanceStr =
+        realMm >= 1000
+          ? `${(realMm / 1000).toFixed(2)} m`
+          : `${realMm.toFixed(1)} mm`
+
+      const midIdx = Math.floor(ptsInPt.length / 2)
+      const centerPt = ptsInPt[midIdx]
+
+      setRulerResult({
+        type: 'distance',
+        scale: rulerScale,
+        color: item.color,
+        isFromObject: true,
+        points: ptsInPt.map((p) => ({ x: p.x * 1.5, y: p.y * 1.5 })),
+        realLengthStr: `総延長: ${realDistanceStr} (用紙: ${totalMm.toFixed(1)}mm)`,
+        distMm: totalMm,
+        distPx: Math.round(totalLengthPt * 1.5),
         center: { x: centerPt.x * 1.5, y: centerPt.y * 1.5 },
       })
       return
@@ -901,7 +941,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
             })),
           }
         }
-      } else if (snap.tool === 'polygon') {
+      } else if (snap.tool === 'polygon' || snap.tool === 'polyline') {
         if (snap.points) {
           updates = {
             points: snap.points.map((p) => ({
@@ -1052,7 +1092,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
                 })),
               }
             }
-          } else if (snap.tool === 'polygon') {
+          } else if (snap.tool === 'polygon' || snap.tool === 'polyline') {
             if (snap.points) {
               updates = {
                 points: snap.points.map((p) => ({
@@ -1143,6 +1183,8 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
         setRulerResult(null)
         setSnapGuide(null)
         setRulerAreaPoints([])
+        setPolygonPoints([])
+        setPolylinePoints([])
       } else if (e.key === 'Enter') {
         if (
           appMode === 'draw' &&
@@ -1152,6 +1194,12 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
         ) {
           e.preventDefault()
           handleFinishRulerArea()
+        } else if (appMode === 'draw' && activeTool === 'polygon' && polygonPoints.length >= 3) {
+          e.preventDefault()
+          handleFinishPolygon()
+        } else if (appMode === 'draw' && activeTool === 'polyline' && polylinePoints.length >= 2) {
+          e.preventDefault()
+          handleFinishPolyline()
         }
       }
     }
@@ -1189,6 +1237,8 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     activeTool,
     rulerMeasureMode,
     rulerAreaPoints,
+    polygonPoints,
+    polylinePoints,
     pageInfo,
     rulerScale,
   ])
@@ -1311,6 +1361,26 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     const targetColor = rulerResult.isFromObject && rulerResult.color ? rulerResult.color : '#10b981'
 
     if (rulerResult.type === 'distance') {
+      if (rulerResult.points && rulerResult.center) {
+        // 連続線の総延長テキストを追加
+        const textLabel = rulerResult.realLengthStr || `${rulerResult.distMm?.toFixed(1)} mm`
+        onAddDrawing({
+          pageIndex: pageInfo.index,
+          tool: 'text',
+          color: targetColor,
+          fillMode: 'none',
+          lineWidth: 1,
+          fontSize: 12,
+          text: textLabel,
+          bgWhite: true,
+          rotation: 0,
+          x: rulerResult.center.x / 1.5 - 30,
+          y: rulerResult.center.y / 1.5 - 8,
+        })
+        setRulerResult(null)
+        return
+      }
+
       const { x1 = 0, y1 = 0, x2 = 0, y2 = 0, realLengthStr, distMm = 0, angleDeg = 0 } = rulerResult
 
       // 手動計測時のみ寸法線を追加（オブジェクト計測時は既存の線があるので寸法線を複製しない）
@@ -1446,6 +1516,26 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     })
 
     setPolygonPoints([])
+  }
+
+  // 連続線（ポリライン）の確定
+  const handleFinishPolyline = () => {
+    if (polylinePoints.length < 2 || !pageInfo) {
+      setPolylinePoints([])
+      return
+    }
+
+    onAddDrawing({
+      pageIndex: pageInfo.index,
+      tool: 'polyline',
+      color: drawColor,
+      fillMode: 'none',
+      lineWidth,
+      fontSize,
+      points: polylinePoints.map((p) => ({ x: p.x / 1.5, y: p.y / 1.5 })),
+    })
+
+    setPolylinePoints([])
   }
 
   // ポインターダウン: ドラッグ開始 または クリック操作
@@ -1605,6 +1695,19 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
         }
       }
       setPolygonPoints((prev) => [...prev, { x: relX, y: relY }])
+      return
+    }
+
+    // 描画モード: 連続線（頂点追加）
+    if (appMode === 'draw' && activeTool === 'polyline') {
+      // 直前の点と同じ位置（ダブルクリック時などの微小距離）なら重複追加を防止
+      if (polylinePoints.length > 0) {
+        const last = polylinePoints[polylinePoints.length - 1]
+        if (Math.hypot(relX - last.x, relY - last.y) < 4) {
+          return
+        }
+      }
+      setPolylinePoints((prev) => [...prev, { x: relX, y: relY }])
       return
     }
 
@@ -1897,6 +2000,8 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
   const handleDoubleClick = () => {
     if (appMode === 'draw' && activeTool === 'polygon') {
       handleFinishPolygon()
+    } else if (appMode === 'draw' && activeTool === 'polyline') {
+      handleFinishPolyline()
     }
   }
 
@@ -2390,6 +2495,119 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
                     {(isHovered || isSelected) && (
                       <g
                         transform={`translate(${cx + rx}, ${cy})`}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onRemoveDrawing(item.id)
+                          setSelectedDrawingId(null)
+                        }}
+                        className="cursor-pointer group/btn"
+                      >
+                        <circle cx="0" cy="0" r="15" fill="transparent" />
+                        <circle cx="0" cy="0" r="10" fill="#ef4444" stroke="#ffffff" strokeWidth="1.5" className="group-hover/btn:fill-rose-600 group-hover/btn:stroke-[2.5px] transition-all" />
+                        <line x1="-4" y1="-4" x2="4" y2="4" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" />
+                        <line x1="4" y1="-4" x2="-4" y2="4" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" />
+                      </g>
+                    )}
+                  </g>
+                )
+              }
+
+              if (item.tool === 'polyline') {
+                if (!item.points || item.points.length < 2) return null
+                const pts = item.points.map((p) => `${p.x * 1.5},${p.y * 1.5}`).join(' ')
+                const avgX = (item.points.reduce((s, p) => s + p.x, 0) / item.points.length) * 1.5
+                const avgY = (item.points.reduce((s, p) => s + p.y, 0) / item.points.length) * 1.5
+                const firstPt = item.points[0]
+                const lastPt = item.points[item.points.length - 1]
+
+                return (
+                  <g
+                    key={item.id}
+                    className={`${itemPointerEvents} group ${
+                      isEraserMode
+                        ? 'cursor-pointer hover:opacity-60'
+                        : isRulerMode
+                        ? 'cursor-crosshair'
+                        : activeTool === 'select' || isSelected
+                        ? 'cursor-move'
+                        : 'cursor-pointer'
+                    }`}
+                    onPointerDown={(e) => handleItemPointerDown(item, e)}
+                    onClick={(e) => handleItemClick(item, e)}
+                    onMouseEnter={() => setHoveredDrawingId(item.id)}
+                    onMouseLeave={() => setHoveredDrawingId(null)}
+                  >
+                    {isRulerMode && <title>クリックしてこの連続線の全延長（実寸）を自動計測</title>}
+                    {isEraserMode && <title>クリックして削除</title>}
+                    {/* 透明な当たり判定バッファ（クリックしやすくする） */}
+                    <polyline
+                      points={pts}
+                      fill="none"
+                      stroke="transparent"
+                      strokeWidth={Math.max(22, item.lineWidth + 18)}
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                    />
+                    {/* 選択枠 */}
+                    {isSelected && !isEraserMode && (
+                      <polyline
+                        points={pts}
+                        fill="none"
+                        stroke="#3b82f6"
+                        strokeWidth={item.lineWidth + 4}
+                        strokeLinejoin="round"
+                        strokeLinecap="round"
+                        strokeDasharray="4 3"
+                        className="pointer-events-none opacity-80"
+                      />
+                    )}
+                    {isEraserMode && isHovered && (
+                      <polyline
+                        points={pts}
+                        fill="none"
+                        stroke="#ef4444"
+                        strokeWidth={item.lineWidth + 4}
+                        strokeLinejoin="round"
+                        strokeLinecap="round"
+                        strokeDasharray="4 2"
+                      />
+                    )}
+                    {/* 実線 */}
+                    <polyline
+                      points={pts}
+                      fill="none"
+                      stroke={isEraserMode && isHovered ? '#ef4444' : item.color}
+                      strokeWidth={item.lineWidth}
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                      className="transition-all"
+                    />
+                    {/* 節点（頂点）マーカー */}
+                    {item.points.map((p, idx) => (
+                      <circle
+                        key={idx}
+                        cx={p.x * 1.5}
+                        cy={p.y * 1.5}
+                        r={Math.max(2.5, item.lineWidth * 0.75)}
+                        fill={isEraserMode && isHovered ? '#ef4444' : item.color}
+                        stroke="#ffffff"
+                        strokeWidth="1"
+                      />
+                    ))}
+
+                    {/* 選択中かつ選択ツールの移動可能バッジ */}
+                    {isSelected && !isEraserMode && activeTool === 'select' && (
+                      <g transform={`translate(${avgX}, ${avgY})`} className="pointer-events-none opacity-90 shadow-md">
+                        <circle cx="0" cy="0" r="9" fill="#0284c7" stroke="#ffffff" strokeWidth="1.5" />
+                        <path d="M -4 0 L 4 0 M 0 -4 L 0 4 M -4 0 L -2 -2 M -4 0 L -2 2 M 4 0 L 2 -2 M 4 0 L 2 2 M 0 -4 L -2 -2 M 0 -4 L 2 -2 M 0 4 L -2 2 M 0 4 L 2 2" stroke="#ffffff" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+                      </g>
+                    )}
+
+                    {/* 削除ボタン */}
+                    {(isHovered || isSelected) && (
+                      <g
+                        transform={`translate(${lastPt.x * 1.5}, ${lastPt.y * 1.5})`}
                         onPointerDown={(e) => e.stopPropagation()}
                         onClick={(e) => {
                           e.stopPropagation()
@@ -3031,6 +3249,42 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
               </g>
             )}
 
+            {/* 連続線描画中のリアルタイムガイド線 */}
+            {appMode === 'draw' && activeTool === 'polyline' && polylinePoints.length > 0 && (
+              <g>
+                <polyline
+                  points={polylinePoints.map((p) => `${p.x},${p.y}`).join(' ')}
+                  fill="none"
+                  stroke={drawColor}
+                  strokeWidth={lineWidth}
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                />
+                {mousePos && (
+                  <line
+                    x1={polylinePoints[polylinePoints.length - 1].x}
+                    y1={polylinePoints[polylinePoints.length - 1].y}
+                    x2={mousePos.x}
+                    y2={mousePos.y}
+                    stroke={drawColor}
+                    strokeWidth={lineWidth}
+                    strokeDasharray="3 3"
+                  />
+                )}
+                {polylinePoints.map((p, idx) => (
+                  <circle
+                    key={idx}
+                    cx={p.x}
+                    cy={p.y}
+                    r={3.5}
+                    fill={drawColor}
+                    stroke="#ffffff"
+                    strokeWidth="1.5"
+                  />
+                ))}
+              </g>
+            )}
+
             {/* 物差し面積計測中のリアルタイムガイド線 */}
             {appMode === 'draw' &&
               activeTool === 'ruler' &&
@@ -3307,6 +3561,43 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
               const highlightColor = rulerResult.color || '#10b981'
 
               if (rulerResult.type === 'distance') {
+                if (rulerResult.points && rulerResult.points.length >= 2) {
+                  const ptsStr = rulerResult.points.map((p) => `${p.x},${p.y}`).join(' ')
+                  return (
+                    <g className="pointer-events-auto">
+                      <polyline
+                        points={ptsStr}
+                        fill="none"
+                        stroke={highlightColor}
+                        strokeWidth="7"
+                        strokeOpacity="0.25"
+                        strokeLinejoin="round"
+                        strokeLinecap="round"
+                      />
+                      <polyline
+                        points={ptsStr}
+                        fill="none"
+                        stroke={highlightColor}
+                        strokeWidth="2.5"
+                        strokeLinejoin="round"
+                        strokeLinecap="round"
+                        strokeDasharray="4 3"
+                      />
+                      {rulerResult.points.map((p, idx) => (
+                        <circle
+                          key={idx}
+                          cx={p.x}
+                          cy={p.y}
+                          r="4"
+                          fill={highlightColor}
+                          stroke="#ffffff"
+                          strokeWidth="1.5"
+                        />
+                      ))}
+                    </g>
+                  )
+                }
+
                 const { x1 = 0, y1 = 0, x2 = 0, y2 = 0 } = rulerResult
                 const dx = x2 - x1
                 const dy = y2 - y1
@@ -3948,6 +4239,8 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
                 ? 'クリックしてテキストを入力'
                 : activeTool === 'polygon'
                 ? 'クリックで頂点を結び、始点クリックまたはダブルクリックで完了'
+                : activeTool === 'polyline'
+                ? 'クリックで頂点を結び、ダブルクリックまたはEnterで完了（Escで取消）'
                 : activeTool === 'check'
                 ? 'クリックしてチェックマークを配置'
                 : activeTool === 'draw_eraser'
@@ -3981,7 +4274,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
           {/* 物差し確定時の計測結果・図面反映ポップアップバッジ */}
           {rulerResult && (() => {
             const pos =
-              rulerResult.type === 'distance'
+              rulerResult.type === 'distance' && !rulerResult.center
                 ? {
                     left: `${((rulerResult.x1 ?? 0) + (rulerResult.x2 ?? 0)) / 2}px`,
                     top: `${((rulerResult.y1 ?? 0) + (rulerResult.y2 ?? 0)) / 2}px`,

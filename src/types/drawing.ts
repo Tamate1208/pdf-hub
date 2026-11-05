@@ -177,6 +177,7 @@ export type DrawingTool =
   | 'text'
   | 'image'
   | 'line'
+  | 'polyline'
   | 'rect'
   | 'polygon'
   | 'circle'

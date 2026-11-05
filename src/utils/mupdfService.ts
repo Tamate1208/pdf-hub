@@ -968,6 +968,18 @@ export async function applyRedactions(
         }
         stream += `h ${d.fillMode === 'solid' || d.fillMode === 'semi' ? 'B' : 'S'}\n`;
         stream += 'Q\n';
+      } else if (d.tool === 'polyline') {
+        if (!d.points || d.points.length < 2) continue;
+        const lw = (d.lineWidth || 2).toFixed(2);
+
+        stream += 'q\n';
+        stream += `${rStr} ${gStr} ${bStr} RG ${lw} w 1 J 1 j\n`;
+        stream += `${fmtPt(d.points[0].x, d.points[0].y)} m\n`;
+        for (let p = 1; p < d.points.length; p++) {
+          stream += `${fmtPt(d.points[p].x, d.points[p].y)} l\n`;
+        }
+        stream += 'S\n';
+        stream += 'Q\n';
       } else if (d.tool === 'text') {
         if (d.x === undefined || d.y === undefined || !d.text) continue;
         const fontPx = d.fontSize || 16;
@@ -1470,9 +1482,13 @@ export async function compactPdf(
         const h = ref.get('Height')?.asNumber() || 0;
         const bpc = ref.get('BitsPerComponent')?.asNumber() || 8;
 
-        // 1bit白黒図面スキャンやマスク付き透過画像、極小アイコンは画質・透過保護のためスキップ
+        // 1bit白黒図面スキャンやFAX圧縮、マスク付き透過画像、極小アイコン、カスタムDecodeは原稿保護のためスキップ
         if (w < 64 || h < 64 || bpc === 1) continue;
         if (ref.get('ImageMask')?.asBoolean() === true) continue;
+        const filterName = ref.get('Filter')?.asName?.() || '';
+        if (filterName === 'CCITTFaxDecode' || filterName === 'JBIG2Decode') continue;
+        const decode = ref.get('Decode');
+        if (decode && !decode.isNull()) continue; // 反転などのDecode指定画像は保護
         const smask = ref.get('SMask');
         const mask = ref.get('Mask');
         if ((smask && !smask.isNull()) || (mask && !mask.isNull())) continue;
@@ -1488,7 +1504,13 @@ export async function compactPdf(
         let mPix = mImg.toPixmap();
         mImg.destroy();
 
-        if (mPix.getNumberOfComponents() !== 3 || mPix.getAlpha()) {
+        // アルファチャンネル（透明度）を持つ画像はJPEG化で黒塗り・白塗りになって原稿が損なわれるため保護
+        if (mPix.getAlpha()) {
+          mPix.destroy();
+          continue;
+        }
+
+        if (mPix.getNumberOfComponents() !== 3) {
           const rgbPix = mPix.convertToColorSpace(m.ColorSpace.DeviceRGB, false);
           mPix.destroy();
           mPix = rgbPix;
@@ -1500,7 +1522,8 @@ export async function compactPdf(
           const scale = maxDim / Math.max(w, h);
           targetW = Math.max(1, Math.round(w * scale));
           targetH = Math.max(1, Math.round(h * scale));
-          const warped = mPix.warp([0, 0, w, 0, 0, h, w, h], targetW, targetH);
+          // MuPDFのfz_warp_pixmapは時計回り(ul, ur, lr, ll)のquadを要求するため、自己交差を防ぐ正しい座標順序を指定
+          const warped = mPix.warp([0, 0, w, 0, w, h, 0, h], targetW, targetH);
           mPix.destroy();
           mPix = warped;
         }
